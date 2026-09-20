@@ -3,8 +3,9 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
+use std::time::Instant;
 
-use crate::config::SCROLLBACK_LIMIT;
+use crate::config::{QUIT_CONFIRM_TIMEOUT, SCROLLBACK_LIMIT};
 use crate::db::{self, SchemaCache};
 use crate::editor::{Completer, History, InputBuffer};
 use crate::parser::{self, DotCommand, StatementKind};
@@ -51,6 +52,9 @@ pub struct App {
     pub scroll_offset: usize,
     pub table: Option<TableView>,
     pub should_quit: bool,
+    /// First Ctrl+C timestamp in input mode; second one within the
+    /// timeout confirms quit.
+    pub quit_armed_at: Option<Instant>,
 }
 
 impl App {
@@ -66,6 +70,7 @@ impl App {
             scroll_offset: 0,
             table: None,
             should_quit: false,
+            quit_armed_at: None,
         }
     }
 
@@ -99,15 +104,60 @@ impl App {
         self.scroll_offset = self.scroll_offset.saturating_sub(n);
     }
 
+    // -- quit confirmation ----------------------------------------------------
+
+    /// Whether a first Ctrl+C is still pending confirmation.
+    pub fn is_quit_armed(&self) -> bool {
+        self.quit_armed_at
+            .is_some_and(|t| t.elapsed() < QUIT_CONFIRM_TIMEOUT)
+    }
+
+    /// Clear a stale first-Ctrl+C marker. Returns true if state changed.
+    pub fn expire_quit_arm(&mut self) -> bool {
+        if let Some(t) = self.quit_armed_at
+            && t.elapsed() >= QUIT_CONFIRM_TIMEOUT
+        {
+            self.quit_armed_at = None;
+            return true;
+        }
+        false
+    }
+
+    fn disarm_quit(&mut self) {
+        self.quit_armed_at = None;
+    }
+
     // -- key dispatch --------------------------------------------------------
 
     /// Handle one key event. Returns nothing; check `should_quit` after.
     pub fn handle_key(&mut self, key: KeyEvent) {
-        if is_quit_key(key) {
+        if is_ctrl_c(key) {
+            match self.mode {
+                Mode::Table => {
+                    // Never quit from the grid; just back to the prompt.
+                    self.close_table();
+                    self.disarm_quit();
+                    return;
+                }
+                Mode::Input => {
+                    if self.is_quit_armed() {
+                        self.should_quit = true;
+                        self.completer.dismiss();
+                    } else {
+                        self.quit_armed_at = Some(Instant::now());
+                        self.completer.dismiss();
+                    }
+                    return;
+                }
+            }
+        }
+        if is_ctrl_d(key) {
             self.should_quit = true;
             self.completer.dismiss();
             return;
         }
+        // Stale confirm markers lapse even while the user keeps typing.
+        self.expire_quit_arm();
         match self.mode {
             Mode::Input => self.handle_input_key(key),
             Mode::Table => self.handle_table_key(key),
@@ -137,9 +187,16 @@ impl App {
                 self.completer.dismiss();
                 self.input.delete_forward();
             }
-            KeyCode::Left => self.input.move_left(),
-            KeyCode::Right => self.input.move_right(),
+            KeyCode::Left => {
+                self.completer.dismiss();
+                self.input.move_left();
+            }
+            KeyCode::Right => {
+                self.completer.dismiss();
+                self.input.move_right();
+            }
             KeyCode::Up => {
+                self.completer.dismiss();
                 if !self.input.move_up() {
                     let cur = self.input.full_text();
                     if let Some(entry) = self.history.move_up(&cur) {
@@ -148,6 +205,7 @@ impl App {
                 }
             }
             KeyCode::Down => {
+                self.completer.dismiss();
                 if !self.input.move_down()
                     && self.history.browsing()
                     && let Some(entry) = self.history.move_down()
@@ -156,9 +214,11 @@ impl App {
                 }
             }
             KeyCode::Home => {
+                self.completer.dismiss();
                 self.input.col = 0;
             }
             KeyCode::End => {
+                self.completer.dismiss();
                 self.input.col = self.input.lines()[self.input.row].chars().count();
             }
             KeyCode::PageUp => self.scroll_output_up(10),
@@ -360,9 +420,14 @@ impl App {
     }
 }
 
-/// Ctrl+C or Ctrl+D quits from anywhere.
-fn is_quit_key(key: KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('c' | 'd')) && key.modifiers.contains(KeyModifiers::CONTROL)
+/// Ctrl+C arms/confirms quit in input mode, closes the grid in table mode.
+fn is_ctrl_c(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('c' | 'C')) && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+/// Ctrl+D quits immediately from anywhere.
+fn is_ctrl_d(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('d' | 'D')) && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 #[cfg(test)]
@@ -381,15 +446,116 @@ mod tests {
 
     #[test]
     fn quit_keys() {
-        let quit = KeyEvent {
+        let ctrl_c = KeyEvent {
             code: KeyCode::Char('c'),
             modifiers: KeyModifiers::CONTROL,
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),
         };
-        assert!(is_quit_key(quit));
-        assert!(!is_quit_key(key(KeyCode::Char('c'))));
-        assert!(!is_quit_key(key(KeyCode::Esc)));
+        let ctrl_d = KeyEvent {
+            code: KeyCode::Char('d'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        };
+        assert!(is_ctrl_c(ctrl_c));
+        assert!(is_ctrl_d(ctrl_d));
+        assert!(!is_ctrl_c(key(KeyCode::Char('c'))));
+        assert!(!is_ctrl_c(key(KeyCode::Esc)));
+        assert!(!is_ctrl_d(key(KeyCode::Esc)));
+    }
+
+    fn ctrl_c() -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        }
+    }
+
+    #[test]
+    fn ctrl_c_twice_quits_from_input() {
+        let mut app = App::new(PathBuf::from("dummy.db"));
+        app.handle_key(ctrl_c());
+        assert!(!app.should_quit);
+        assert!(app.is_quit_armed());
+        app.handle_key(ctrl_c());
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn ctrl_c_timeout_resets() {
+        use std::time::Duration;
+        let mut app = App::new(PathBuf::from("dummy.db"));
+        app.handle_key(ctrl_c());
+        assert!(app.is_quit_armed());
+        // Simulate the 3s window lapsing.
+        app.quit_armed_at = Some(
+            std::time::Instant::now()
+                - crate::config::QUIT_CONFIRM_TIMEOUT
+                - Duration::from_millis(10),
+        );
+        assert!(!app.is_quit_armed());
+        assert!(app.expire_quit_arm());
+        assert!(app.quit_armed_at.is_none());
+        // Next Ctrl+C re-arms instead of quitting.
+        app.handle_key(ctrl_c());
+        assert!(!app.should_quit);
+        assert!(app.is_quit_armed());
+    }
+
+    #[test]
+    fn input_stays_usable_after_first_ctrl_c() {
+        let mut app = App::new(PathBuf::from("dummy.db"));
+        app.handle_key(ctrl_c());
+        assert!(app.is_quit_armed());
+        type_text(&mut app, "select 1;");
+        assert_eq!(app.input.full_text(), "select 1;");
+        assert!(app.is_quit_armed());
+        // Still quits on the confirming press.
+        app.handle_key(ctrl_c());
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn ctrl_c_from_table_goes_back_without_quitting() {
+        use crate::db::QueryResult;
+        let mut app = App::new(PathBuf::from("dummy.db"));
+        app.table = Some(TableView::new(QueryResult {
+            headers: vec!["a".to_string()],
+            rows: vec![vec!["1".to_string()]],
+            truncated: false,
+        }));
+        app.mode = Mode::Table;
+        app.handle_key(ctrl_c());
+        assert_eq!(app.mode, Mode::Input);
+        assert!(app.table.is_none());
+        assert!(!app.should_quit);
+        assert!(!app.is_quit_armed());
+    }
+
+    #[test]
+    fn table_ctrl_c_does_not_count_towards_quit() {
+        use crate::db::QueryResult;
+        let mut app = App::new(PathBuf::from("dummy.db"));
+        app.handle_key(ctrl_c());
+        assert!(app.is_quit_armed());
+        app.table = Some(TableView::new(QueryResult {
+            headers: vec!["a".to_string()],
+            rows: vec![vec!["1".to_string()]],
+            truncated: false,
+        }));
+        app.mode = Mode::Table;
+        app.handle_key(ctrl_c());
+        assert_eq!(app.mode, Mode::Input);
+        assert!(!app.should_quit);
+        assert!(!app.is_quit_armed());
+        // Needs two fresh presses to quit now.
+        app.handle_key(ctrl_c());
+        assert!(!app.should_quit);
+        app.handle_key(ctrl_c());
+        assert!(app.should_quit);
     }
 
     #[test]
@@ -496,7 +662,15 @@ mod tests {
         app.handle_key(key(KeyCode::Up));
         assert_eq!(app.input.full_text(), "select * from nope;");
 
-        // Ctrl+C quits from input mode.
+        // Ctrl+C twice quits from input mode (first arms, second confirms).
+        app.handle_key(KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        });
+        assert!(!app.should_quit);
+        assert!(app.is_quit_armed());
         app.handle_key(KeyEvent {
             code: KeyCode::Char('c'),
             modifiers: KeyModifiers::CONTROL,

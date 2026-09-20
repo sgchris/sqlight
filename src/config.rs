@@ -26,6 +26,11 @@ pub const SCROLLBACK_LIMIT: usize = 500;
 /// SQLite busy timeout per statement, in milliseconds.
 pub const BUSY_TIMEOUT_MS: u64 = 5_000;
 
+/// Time window in which a second Ctrl+C confirms quit.
+pub const QUIT_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Bottom-bar message shown after the first Ctrl+C in input mode.
+pub const QUIT_CONFIRM_MESSAGE: &str = "Press Ctrl+C again to quit";
+
 /// Minimum prefix length that triggers autocompletion.
 pub const COMPLETE_MIN_CHARS: usize = 2;
 

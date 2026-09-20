@@ -393,31 +393,26 @@ impl Completer {
         self.index = 0;
     }
 
-    pub fn is_active(&self) -> bool {
-        self.active_prefix.is_some()
-    }
-
-    /// Index of the currently highlighted candidate.
-    pub fn index(&self) -> usize {
-        self.index
-    }
-
-    pub fn candidates(&self) -> &[String] {
-        &self.candidates
-    }
-
     /// Advance one completion step. Returns the replacement word, if any.
     /// `shift` cycles backwards (Shift+Tab).
+    ///
+    /// TAB cycles through all matches for the originally typed prefix:
+    /// `te` -> `text_id` -> `texts` -> `text_id` ... The session continues
+    /// while the current word is the original prefix or one of the
+    /// previously offered candidates (i.e. a word TAB itself inserted).
+    /// Any other word starts a fresh session.
     pub fn complete(&mut self, word: &str, shift: bool) -> Option<String> {
         if word.chars().count() < COMPLETE_MIN_CHARS {
             self.dismiss();
             return None;
         }
-        let same_session = self.active_prefix.as_deref() == Some(word)
-            || self
-                .active_prefix
-                .as_ref()
-                .is_some_and(|p| word.eq_ignore_ascii_case(p));
+        let same_session = match &self.active_prefix {
+            None => false,
+            Some(prefix) => {
+                word.eq_ignore_ascii_case(prefix)
+                    || self.candidates.iter().any(|c| c.eq_ignore_ascii_case(word))
+            }
+        };
         if !same_session {
             self.active_prefix = Some(word.to_string());
             self.candidates = self.build_candidates(word);
@@ -545,6 +540,29 @@ mod tests {
         // Third TAB wraps around to the first candidate.
         let d = c.complete("se", false).unwrap();
         assert_eq!(d, a);
+    }
+
+    #[test]
+    fn completer_cycles_through_replaced_word() {
+        let mut c = Completer::new();
+        c.set_schema(vec!["text_id".to_string(), "texts".to_string()], vec![]);
+        // First TAB completes "te" to the first match.
+        let first = c.complete("te", false).unwrap();
+        assert_eq!(first, "text_id");
+        // Second TAB sees the already-completed word and advances
+        // to the next match instead of restarting the session.
+        let second = c.complete(&first, false).unwrap();
+        assert_eq!(second, "texts");
+        // Third TAB wraps around.
+        let third = c.complete(&second, false).unwrap();
+        assert_eq!(third, "text_id");
+        // Shift+TAB cycles backwards.
+        let back = c.complete(&third, true).unwrap();
+        assert_eq!(back, "texts");
+        // An unrelated word restarts the session (no match -> None).
+        assert_eq!(c.complete("zz", false), None);
+        // Original prefix starts a fresh session again.
+        assert_eq!(c.complete("te", false), Some("text_id".to_string()));
     }
 
     #[test]

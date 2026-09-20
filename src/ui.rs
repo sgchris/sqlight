@@ -6,20 +6,18 @@ use ratatui::{
     layout::{Constraint, Layout, Position, Rect},
     style::Style,
     text::{Line, Span, Text},
-    widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Paragraph, Wrap},
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, LineKind, Mode};
 use crate::config::{
     COLOR_ERROR, COLOR_HINT, COLOR_OK, COLOR_PROMPT, COLOR_WARN, CONT_INDENT, INPUT_HINT, MAX_ROWS,
-    PROMPT,
+    PROMPT, QUIT_CONFIRM_MESSAGE,
 };
 
 /// Max visual rows the input box may occupy (rest goes to scrollback).
 const MAX_INPUT_HEIGHT: u16 = 12;
-/// Max candidates shown in the completion popup.
-const MAX_POPUP_ITEMS: usize = 8;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -49,16 +47,20 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect) {
 
     render_scrollback(frame, app, chunks[0]);
     render_prompt(frame, app, chunks[1]);
-    render_status(
-        frame,
-        chunks[2],
-        "Enter run/newline · Tab complete · ↑↓ history · PgUp/PgDn output · Ctrl+C quit",
-        &app.db_path.to_string_lossy(),
-    );
-
-    // Completion popup floats above the prompt.
-    if app.completer.is_active() && !app.completer.candidates().is_empty() {
-        render_popup(frame, app, area, chunks[1]);
+    if app.is_quit_armed() {
+        render_bar_line(
+            frame,
+            chunks[2],
+            QUIT_CONFIRM_MESSAGE,
+            Style::default().fg(COLOR_WARN).bold(),
+        );
+    } else {
+        render_status(
+            frame,
+            chunks[2],
+            "Enter run/newline · Tab complete · ↑↓ history · PgUp/PgDn output · Ctrl+C quit",
+            &app.db_path.to_string_lossy(),
+        );
     }
 }
 
@@ -163,39 +165,6 @@ fn cursor_visual_pos(app: &App, area: Rect) -> (u16, u16) {
     (u16::try_from(total % w).unwrap_or(0), y as u16)
 }
 
-fn render_popup(frame: &mut Frame, app: &App, _full: Rect, input_area: Rect) {
-    let candidates = app.completer.candidates();
-    let shown = candidates.len().min(MAX_POPUP_ITEMS);
-    let width = candidates
-        .iter()
-        .take(shown)
-        .map(|c| display_w(c))
-        .max()
-        .unwrap_or(10)
-        .min(40)
-        + 4;
-    let width = u16::try_from(width).unwrap_or(20);
-    let height = u16::try_from(shown + 2).unwrap_or(4);
-    let x = input_area.x.min(input_area.width.saturating_sub(width));
-    let y = input_area.y.saturating_sub(height);
-    let area = Rect::new(x, y, width.min(input_area.width.max(1)), height);
-    if area.height < 3 {
-        return;
-    }
-    let items: Vec<ListItem> = candidates
-        .iter()
-        .take(shown)
-        .map(|c| ListItem::new(Line::raw(c.clone())))
-        .collect();
-    let list = List::new(items)
-        .block(Block::bordered().title(" complete "))
-        .highlight_style(Style::default().reversed());
-    let mut state = ListState::default();
-    state.select(Some(app.completer.index().min(shown.saturating_sub(1))));
-    frame.render_widget(Clear, area);
-    frame.render_stateful_widget(list, area, &mut state);
-}
-
 // -- table mode ----------------------------------------------------------------
 
 fn render_table(frame: &mut Frame, app: &App, area: Rect) {
@@ -206,16 +175,18 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
 
     // Compose padded text lines (manual grid: full control over H-scroll +
     // variable row heights, no TableState API drift across versions).
-    let headers: Vec<String> = table
-        .headers
+    // Headers, separator and every row share the same visible columns and
+    // the same fixed `col_widths`, so `←/→` scrolls them together and all
+    // columns stay aligned. Every cell is padded to its column width;
+    // wrap mode reflows text inside the same width.
+    let visible: Vec<usize> = visible_cols(table).collect();
+    let headers: Vec<String> = visible
         .iter()
-        .enumerate()
-        .map(|(c, h)| pad_to(table.col_widths[c], h))
+        .map(|&c| pad_to(table.col_widths[c], &table.headers[c]))
         .collect();
-    let sep = table
-        .col_widths
+    let sep = visible
         .iter()
-        .map(|w| "─".repeat(*w))
+        .map(|&c| "─".repeat(table.col_widths[c]))
         .collect::<Vec<_>>()
         .join("─┼─");
     let header_line = Line::from(Span::styled(headers.join(" │ "), Style::default().bold()));
@@ -231,17 +202,15 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
         }
         if table.wrapped {
             // Multi-line row: stack wrapped cell lines side by side.
-            let cells: Vec<Vec<String>> = visible_cols(table)
-                .map(|c| table.cell_lines(r, c))
-                .collect();
+            let cells: Vec<Vec<String>> = visible.iter().map(|&c| table.cell_lines(r, c)).collect();
             for li in 0..h {
                 let parts: Vec<String> = cells
                     .iter()
                     .enumerate()
                     .map(|(vi, cell)| {
-                        let col = table.offset_x + vi;
+                        let col = visible[vi];
                         cell.get(li)
-                            .cloned()
+                            .map(|s| pad_to(table.col_widths[col], s))
                             .unwrap_or_else(|| " ".repeat(table.col_widths[col]))
                     })
                     .collect();
@@ -253,13 +222,15 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
                 body.push(Line::from(Span::styled(parts.join(" │ "), style)));
             }
         } else {
-            let parts: Vec<String> = visible_cols(table)
-                .map(|c| {
-                    table
+            let parts: Vec<String> = visible
+                .iter()
+                .map(|&c| {
+                    let s = table
                         .cell_lines(r, c)
                         .into_iter()
                         .next()
-                        .unwrap_or_default()
+                        .unwrap_or_default();
+                    pad_to(table.col_widths[c], &s)
                 })
                 .collect();
             let style = if r % 2 == 1 {
@@ -319,7 +290,7 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
     render_bar_line(
         frame,
         foot[1],
-        "ESC back · w wrap · ↑↓←→ scroll · PgUp/PgDn · Ctrl+C quit",
+        "ESC back · w wrap · ↑↓←→ scroll · PgUp/PgDn · Ctrl+C back",
         Style::default().fg(COLOR_HINT),
     );
     // No cursor in table mode (hidden by not setting a position).
@@ -460,5 +431,43 @@ mod tests {
         assert!(text.contains("wrap: on"), "wrap state shown");
         assert!(text.contains("truncated"), "truncation note shown");
         assert!(text.contains("ESC back"), "help shown");
+        assert!(text.contains("Ctrl+C back"), "table Ctrl+C goes back");
+    }
+
+    #[test]
+    fn renders_quit_confirm_and_reverts() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        use std::time::Duration;
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).expect("terminal");
+        let mut app = App::new(PathBuf::from("demo.db"));
+        let ctrl_c = KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        };
+        app.handle_key(ctrl_c);
+        term.draw(|f| render(f, &app)).expect("draw confirm");
+        let text = screen_text(&term);
+        assert!(
+            text.contains(QUIT_CONFIRM_MESSAGE),
+            "confirm message visible, got: {text}"
+        );
+        // After the timeout the normal hint bar comes back.
+        app.quit_armed_at = Some(
+            std::time::Instant::now()
+                - crate::config::QUIT_CONFIRM_TIMEOUT
+                - Duration::from_millis(10),
+        );
+        assert!(app.expire_quit_arm());
+        term.draw(|f| render(f, &app)).expect("draw reverted");
+        let text = screen_text(&term);
+        assert!(
+            !text.contains(QUIT_CONFIRM_MESSAGE),
+            "confirm message reverted"
+        );
+        assert!(text.contains("Tab complete"), "hint bar restored");
     }
 }

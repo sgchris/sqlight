@@ -43,7 +43,9 @@ Internal commands (no `;` needed):
 | `Esc` | Close autocomplete popup, or exit table view back to prompt |
 | `w` (in table) | Wrap/unwrap long values (wrap shows up to 8 lines) |
 | `Up`/`Down`/`Left`/`Right`, `PgUp`/`PgDn` (in table) | Scroll grid |
-| `Ctrl+C` / `Ctrl+D` | Quit anywhere |
+| `Ctrl+C` (in prompt) | Quit (press twice within 3s to confirm) |
+| `Ctrl+C` (in table) | Back to prompt |
+| `Ctrl+D` | Quit anywhere |
 
 `SELECT` results open a full-screen scrollable grid. Long values are truncated
 with `...`; press `w` to wrap them. Writes print green `Affected N rows` / `OK`;

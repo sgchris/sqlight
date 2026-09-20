@@ -46,6 +46,8 @@ fn run() -> Result<(), i32> {
     terminal.draw(|f| ui::render(f, &app)).ok();
     loop {
         // Block for input; repaint only when something happened.
+        // The 500ms tick also lets a stale Ctrl+C confirm lapse so the
+        // bottom bar reverts even with no further keypresses.
         match event::poll(Duration::from_millis(500)) {
             Ok(true) => match event::read() {
                 Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
@@ -53,11 +55,16 @@ fn run() -> Result<(), i32> {
                     terminal.draw(|f| ui::render(f, &app)).ok();
                 }
                 Ok(_) => {
+                    app.expire_quit_arm();
                     terminal.draw(|f| ui::render(f, &app)).ok();
                 }
                 Err(_) => break,
             },
-            Ok(false) => {}
+            Ok(false) => {
+                if app.expire_quit_arm() {
+                    terminal.draw(|f| ui::render(f, &app)).ok();
+                }
+            }
             Err(_) => break,
         }
         if app.should_quit {
