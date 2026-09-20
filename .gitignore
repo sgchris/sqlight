@@ -1,0 +1,18 @@
+# Rust
+/target/
+
+# SQLite test databases
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+
+# Local scratch (prompt-mandated)
+.temp/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

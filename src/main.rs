@@ -1,0 +1,70 @@
+//! Startup, terminal lifecycle, and the main event loop.
+
+mod app;
+mod cli;
+mod config;
+mod db;
+mod editor;
+mod parser;
+mod table_view;
+mod ui;
+
+use crossterm::event::{self, Event, KeyEventKind};
+use std::io::Write;
+use std::time::Duration;
+
+use app::App;
+use cli::Cli;
+
+fn main() {
+    if let Err(code) = run() {
+        std::process::exit(code);
+    }
+}
+
+fn run() -> Result<(), i32> {
+    let cli = Cli::parse_args();
+
+    // File IO problems exit *before* entering the TUI, with a message.
+    if let Err(msg) = db::preflight_db(&cli.db_path) {
+        let _ = writeln!(std::io::stderr(), "{msg}");
+        return Err(1);
+    }
+
+    // Terminal init. Any failure here is also a plain stderr exit.
+    let mut terminal = match ratatui::try_init() {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "Error: cannot start terminal UI: {e}");
+            return Err(1);
+        }
+    };
+
+    let mut app = App::new(cli.db_path);
+    app.refresh_schema();
+
+    terminal.draw(|f| ui::render(f, &app)).ok();
+    loop {
+        // Block for input; repaint only when something happened.
+        match event::poll(Duration::from_millis(500)) {
+            Ok(true) => match event::read() {
+                Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                    app.handle_key(key);
+                    terminal.draw(|f| ui::render(f, &app)).ok();
+                }
+                Ok(_) => {
+                    terminal.draw(|f| ui::render(f, &app)).ok();
+                }
+                Err(_) => break,
+            },
+            Ok(false) => {}
+            Err(_) => break,
+        }
+        if app.should_quit {
+            break;
+        }
+    }
+
+    ratatui::restore();
+    Ok(())
+}
