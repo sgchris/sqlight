@@ -6,6 +6,7 @@ mod config;
 mod db;
 mod editor;
 mod parser;
+mod storage;
 mod table_view;
 mod ui;
 
@@ -41,6 +42,8 @@ fn run() -> Result<(), i32> {
     };
 
     let mut app = App::new(cli.db_path);
+    app.history_file = storage::history_file_path();
+    app.load_history();
     app.refresh_schema();
 
     terminal.draw(|f| ui::render(f, &app)).ok();

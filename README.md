@@ -51,6 +51,11 @@ Internal commands (no `;` needed):
 with `...`; press `w` to wrap them. Writes print green `Affected N rows` / `OK`;
 errors are light-red, warnings (e.g. truncation, empty DB) orange.
 
+Command history (`Up`/`Down`, up to 200 entries) persists between sessions in
+a per-user file: `%APPDATA%\sqlight\history` on Windows,
+`~/Library/Application Support/sqlight/history` on macOS, and
+`$XDG_DATA_HOME/sqlight/history` (or `~/.local/share/sqlight/history`) on Linux.
+
 ## Compile-time config
 
 Tweak `src/config.rs` (`MIN_COL_WIDTH`, `MAX_COL_WIDTH`, `MAX_ROWS`, etc.)

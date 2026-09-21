@@ -21,6 +21,10 @@ pub const TRUNC_SUFFIX: &str = "...";
 
 /// Maximum commands remembered for Up/Down history.
 pub const HISTORY_LIMIT: usize = 200;
+/// Subdirectory name inside the per-user data dir (see `storage`).
+pub const APP_DATA_DIR: &str = "sqlight";
+/// History file name inside the per-user data dir.
+pub const HISTORY_FILE_NAME: &str = "history";
 /// Maximum scrollback lines kept in command mode.
 pub const SCROLLBACK_LIMIT: usize = 500;
 /// SQLite busy timeout per statement, in milliseconds.

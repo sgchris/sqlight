@@ -193,7 +193,14 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
     let sep_line = Line::from(Span::styled(sep, Style::default().fg(COLOR_HINT)));
 
     let mut body: Vec<Line> = vec![header_line, sep_line];
-    let body_h = chunks[0].height.saturating_sub(2) as usize; // minus header+sep
+    // Inner area excludes the surrounding border (1 cell on each side).
+    // Paragraph wrapping is disabled below so each composed `Line` is
+    // exactly one terminal row; clip to the inner width/height instead of
+    // the outer chunk, otherwise the 1-2 overflow chars wrap onto a
+    // second visual line (most visible as a near-empty second row).
+    let inner_w = chunks[0].width.saturating_sub(2) as usize;
+    let inner_h = chunks[0].height.saturating_sub(2) as usize;
+    let body_h = inner_h.saturating_sub(2); // minus header+sep
     let mut used = 0usize;
     for r in table.offset_y..table.row_count() {
         let h = table.row_height(r).max(1);
@@ -245,9 +252,8 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
 
     // Horizontal overflow: drop leading display-columns per offset is
     // column-granular already (offset_x skips whole columns). Clip the right
-    // edge to the viewport width.
-    let vw = chunks[0].width as usize;
-    let clipped: Vec<Line> = body.into_iter().map(|l| clip_line(l, vw)).collect();
+    // edge to the inner viewport width (inside the border).
+    let clipped: Vec<Line> = body.into_iter().map(|l| clip_line(l, inner_w)).collect();
 
     // Show a "«" marker when columns are scrolled off to the left.
     let title = if table.offset_x > 0 {
@@ -259,9 +265,11 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         format!(" {} rows × {} cols ", table.row_count(), table.col_count())
     };
-    let para = Paragraph::new(Text::from(clipped))
-        .block(Block::bordered().title(title))
-        .wrap(Wrap { trim: false });
+    // No `.wrap()`: wrapping is handled manually via `TableView::cell_lines`
+    // (wrap mode) or truncation (non-wrap mode). Letting `Paragraph` wrap
+    // would turn one logical row into two terminal rows when the composed
+    // line exceeds the inner width.
+    let para = Paragraph::new(Text::from(clipped)).block(Block::bordered().title(title));
     frame.render_widget(para, chunks[0]);
 
     let wrap_state = if table.wrapped { "on" } else { "off" };
@@ -432,6 +440,42 @@ mod tests {
         assert!(text.contains("truncated"), "truncation note shown");
         assert!(text.contains("ESC back"), "help shown");
         assert!(text.contains("Ctrl+C back"), "table Ctrl+C goes back");
+    }
+
+    #[test]
+    fn renders_table_nonwrap_one_line_per_row() {
+        use crate::db::QueryResult;
+        use crate::table_view::TableView;
+
+        // Composed grid line (20 + 3 + 20 = 43) exceeds the inner width
+        // (40 - 2 border = 38): without clipping + no-wrap it would spill
+        // 2 chars onto a second visual line.
+        let backend = TestBackend::new(40, 10);
+        let mut term = Terminal::new(backend).expect("terminal");
+        let mut app = App::new(PathBuf::from("demo.db"));
+        let view = TableView::new(QueryResult {
+            headers: vec!["c1".to_string(), "c2".to_string()],
+            rows: vec![vec!["X".repeat(20), "Y".repeat(20)]],
+            truncated: false,
+        });
+        assert!(!view.wrapped, "non-wrap mode");
+        app.table = Some(view);
+        app.mode = Mode::Table;
+        term.draw(|f| render(f, &app)).expect("draw table");
+
+        let buf = term.backend().buffer();
+        let w = buf.area.width as usize;
+        let rows: Vec<String> = buf
+            .content()
+            .chunks(w)
+            .map(|r| r.iter().map(|c| c.symbol()).collect())
+            .collect();
+        let y_rows: Vec<&String> = rows.iter().filter(|r| r.contains('Y')).collect();
+        assert_eq!(
+            y_rows.len(),
+            1,
+            "one terminal row per data row in non-wrap mode, got: {rows:?}"
+        );
     }
 
     #[test]

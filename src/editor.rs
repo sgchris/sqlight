@@ -309,6 +309,11 @@ impl History {
         self.entries.is_empty()
     }
 
+    /// Borrow all remembered entries, oldest first (for persistence).
+    pub fn entries(&self) -> &[String] {
+        &self.entries
+    }
+
     pub fn push(&mut self, entry: String) {
         if entry.trim().is_empty() {
             return;

@@ -9,6 +9,7 @@ use crate::config::{QUIT_CONFIRM_TIMEOUT, SCROLLBACK_LIMIT};
 use crate::db::{self, SchemaCache};
 use crate::editor::{Completer, History, InputBuffer};
 use crate::parser::{self, DotCommand, StatementKind};
+use crate::storage;
 use crate::table_view::TableView;
 
 /// Which screen the user is looking at.
@@ -45,6 +46,10 @@ pub struct App {
     pub mode: Mode,
     pub input: InputBuffer,
     pub history: History,
+    /// Persistence target for Up/Down history. `None` keeps history
+    /// memory-only (used by tests); the real binary sets the per-user
+    /// file from `storage::history_file_path` at startup.
+    pub history_file: Option<PathBuf>,
     pub completer: Completer,
     pub schema: SchemaCache,
     pub scrollback: Vec<ScrollLine>,
@@ -64,6 +69,7 @@ impl App {
             mode: Mode::Input,
             input: InputBuffer::new(),
             history: History::new(),
+            history_file: None,
             completer: Completer::new(),
             schema: SchemaCache::default(),
             scrollback: Vec::new(),
@@ -71,6 +77,23 @@ impl App {
             table: None,
             should_quit: false,
             quit_armed_at: None,
+        }
+    }
+
+    /// Load persisted Up/Down history into memory. No-op when no
+    /// `history_file` is set; missing/corrupt files load as empty.
+    pub fn load_history(&mut self) {
+        if let Some(path) = self.history_file.clone() {
+            self.history = storage::load_history_from_file(&path);
+        }
+    }
+
+    /// Remember one command in memory and persist it. Best-effort:
+    /// file failures never surface to the user.
+    fn push_history(&mut self, entry: String) {
+        self.history.push(entry);
+        if let Some(path) = self.history_file.clone() {
+            let _ = storage::save_history_to_file(&self.history, &path);
         }
     }
 
@@ -288,7 +311,7 @@ impl App {
         if let Some(parsed) = parser::parse_dot_command(&text) {
             match parsed {
                 Ok(cmd) => {
-                    self.history.push(text.trim().to_string());
+                    self.push_history(text.trim().to_string());
                     self.push_line(
                         format!("# {}", text.trim().replace('\n', " ")),
                         LineKind::Echo,
@@ -299,7 +322,7 @@ impl App {
                     // Only treat leading-dot lines as dot errors; other text
                     // falls through to SQL handling below.
                     if text.trim_start().starts_with('.') {
-                        self.history.push(text.trim().to_string());
+                        self.push_history(text.trim().to_string());
                         self.push_line(
                             format!("# {}", text.trim().replace('\n', " ")),
                             LineKind::Echo,
@@ -327,7 +350,7 @@ impl App {
             self.input.clear();
             return;
         }
-        self.history.push(text.trim().to_string());
+        self.push_history(text.trim().to_string());
         // Echo the command back (collapsed to flow in narrow windows is
         // handled by the renderer; keep full text here).
         self.push_line(format!("# {}", text.trim()), LineKind::Echo);
@@ -699,5 +722,49 @@ mod tests {
                 .any(|l| l.text == "Affected 1 row" && l.kind == LineKind::Ok)
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn history_persists_across_sessions_via_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "sqlight-app-history-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let history_path = dir.join("history");
+
+        // First session writes (multiline entry included).
+        let mut first = App::new(PathBuf::from("dummy.db"));
+        first.history_file = Some(history_path.clone());
+        first.load_history();
+        assert!(first.history.is_empty());
+        first.push_history("select 1;".to_string());
+        first.push_history("line1\nline2;".to_string());
+        assert!(history_path.is_file());
+
+        // Second session loads what the first one stored.
+        let mut second = App::new(PathBuf::from("dummy.db"));
+        second.history_file = Some(history_path.clone());
+        second.load_history();
+        assert_eq!(
+            second.history.entries(),
+            &["select 1;".to_string(), "line1\nline2;".to_string()]
+        );
+        // Up restores the multiline entry whole, caret at end.
+        second.handle_key(key(KeyCode::Up));
+        assert_eq!(second.input.full_text(), "line1\nline2;");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn history_stays_memory_only_without_file() {
+        let mut app = App::new(PathBuf::from("dummy.db"));
+        assert!(app.history_file.is_none());
+        app.push_history("select 1;".to_string());
+        assert_eq!(app.history.entries(), &["select 1;".to_string()]);
     }
 }
