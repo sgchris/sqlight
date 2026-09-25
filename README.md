@@ -4,6 +4,9 @@ A convenient terminal (TUI) client for SQLite — a friendlier alternative to th
 `sqlite3` CLI, with multiline editing, `TAB` autocomplete and a scrollable
 results grid.
 
+<img width="1115" height="628" alt="image" src="https://github.com/user-attachments/assets/f97e4a9e-642d-4d00-9e72-b47786ee1816" />
+
+
 ## Install / run
 
 ```sh
