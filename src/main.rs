@@ -46,7 +46,7 @@ fn run() -> Result<(), i32> {
     app.load_history();
     app.refresh_schema();
 
-    terminal.draw(|f| ui::render(f, &app)).ok();
+    terminal.draw(|f| ui::render(f, &mut app)).ok();
     loop {
         // Block for input; repaint only when something happened.
         // The 500ms tick also lets a stale Ctrl+C confirm lapse so the
@@ -55,17 +55,17 @@ fn run() -> Result<(), i32> {
             Ok(true) => match event::read() {
                 Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                     app.handle_key(key);
-                    terminal.draw(|f| ui::render(f, &app)).ok();
+                    terminal.draw(|f| ui::render(f, &mut app)).ok();
                 }
                 Ok(_) => {
                     app.expire_quit_arm();
-                    terminal.draw(|f| ui::render(f, &app)).ok();
+                    terminal.draw(|f| ui::render(f, &mut app)).ok();
                 }
                 Err(_) => break,
             },
             Ok(false) => {
                 if app.expire_quit_arm() {
-                    terminal.draw(|f| ui::render(f, &app)).ok();
+                    terminal.draw(|f| ui::render(f, &mut app)).ok();
                 }
             }
             Err(_) => break,

@@ -462,7 +462,7 @@ impl Completer {
             }
         }
         // Dot-commands when completing from line start.
-        for dot in [".tables", ".schema"] {
+        for dot in [".tables", ".schema", ".clear"] {
             if dot.starts_with(&prefix.to_lowercase()) && prefix.starts_with('.') {
                 push_unique(dot);
             }
@@ -578,5 +578,12 @@ mod tests {
         assert_eq!(w, "us");
         b.replace_word_before_cursor("users");
         assert_eq!(b.full_text(), "select users");
+    }
+
+    #[test]
+    fn completer_suggests_clear_dot_command() {
+        let mut c = Completer::new();
+        c.set_schema(vec![], vec![]);
+        assert_eq!(c.complete(".cl", false), Some(".clear".to_string()));
     }
 }

@@ -6,7 +6,7 @@ pub const PROMPT: &str = "# ";
 /// Indentation for continuation lines of a multiline statement.
 pub const CONT_INDENT: &str = "    ";
 /// Placeholder shown when the input buffer is empty.
-pub const INPUT_HINT: &str = "SQL + ;  or  .tables  —  Enter: run/newline  Tab: complete";
+pub const INPUT_HINT: &str = "SQL + ;  or  .tables/.clear  —  Enter: run/newline  Tab: complete";
 
 /// Minimum on-screen column width in the results grid.
 pub const MIN_COL_WIDTH: usize = 8;
@@ -27,6 +27,10 @@ pub const APP_DATA_DIR: &str = "sqlight";
 pub const HISTORY_FILE_NAME: &str = "history";
 /// Maximum scrollback lines kept in command mode.
 pub const SCROLLBACK_LIMIT: usize = 500;
+/// Output lines scrolled per Shift+Up/Down press.
+pub const OUTPUT_SCROLL_LINE: usize = 1;
+/// Output lines scrolled per PgUp/PgDn press.
+pub const OUTPUT_SCROLL_PAGE: usize = 10;
 /// SQLite busy timeout per statement, in milliseconds.
 pub const BUSY_TIMEOUT_MS: u64 = 5_000;
 

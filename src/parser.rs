@@ -2,7 +2,7 @@
 //!
 //! - `has_trailing_semi`: string/comment-aware check for a terminating `;`.
 //! - `classify`: grid (SELECT-family) vs textual (write) execution.
-//! - `parse_dot_command`: `.tables` / `.schema TABLE` parsing.
+//! - `parse_dot_command`: `.tables` / `.schema TABLE` / `.clear` parsing.
 
 /// How a complete statement should be executed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +18,7 @@ pub enum StatementKind {
 pub enum DotCommand {
     Tables,
     Schema { table: String },
+    Clear,
 }
 
 /// Error for unknown or malformed dot-commands.
@@ -34,7 +35,7 @@ impl std::fmt::Display for DotError {
         match self {
             Self::Unknown(cmd) => write!(
                 f,
-                "Unknown command: {cmd}. Supported: .tables, .schema TABLE"
+                "Unknown command: {cmd}. Supported: .tables, .schema TABLE, .clear"
             ),
             Self::MissingTable => write!(f, "Usage: .schema TABLE_NAME"),
             Self::TooManyArgs => write!(f, "Too many arguments. Usage: .schema TABLE_NAME"),
@@ -177,6 +178,13 @@ pub fn parse_dot_command(line: &str) -> Option<Result<DotCommand, DotError>> {
                 }
             }
         },
+        ".clear" => {
+            if parts.next().is_some() {
+                Some(Err(DotError::TooManyArgs))
+            } else {
+                Some(Ok(DotCommand::Clear))
+            }
+        }
         other => Some(Err(DotError::Unknown(other.to_string()))),
     }
 }
@@ -289,5 +297,26 @@ mod tests {
             parse_dot_command(".foo"),
             Some(Err(DotError::Unknown(_)))
         ));
+    }
+
+    #[test]
+    fn dot_clear() {
+        assert_eq!(parse_dot_command(".clear"), Some(Ok(DotCommand::Clear)));
+        assert_eq!(parse_dot_command("  .clear  "), Some(Ok(DotCommand::Clear)));
+        assert!(matches!(
+            parse_dot_command(".clear extra"),
+            Some(Err(DotError::TooManyArgs))
+        ));
+    }
+
+    #[test]
+    fn unknown_mentions_supported_commands() {
+        let err = match parse_dot_command(".foo") {
+            Some(Err(e)) => e.to_string(),
+            other => panic!("expected unknown dot error, got {other:?}"),
+        };
+        assert!(err.contains(".tables"), "{err}");
+        assert!(err.contains(".schema"), "{err}");
+        assert!(err.contains(".clear"), "{err}");
     }
 }

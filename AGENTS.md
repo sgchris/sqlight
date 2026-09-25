@@ -43,7 +43,7 @@ Run `fmt` + `clippy` + `test` before every commit. Keep `cargo build` warning-fr
 - Unicode: use `unicode-width` for widths; cursor math on `char`s, never bytes.
 - Colors: success green, error light-red, warning orange (see `config.rs`);
   always keep a text prefix (`Error:`, `Warning:`), color is not the only signal.
-- Internal commands: only `.tables` and `.schema TABLE`. Unknown `.foo` is an error.
+- Internal commands: `.tables`, `.schema TABLE`, `.clear`. Unknown `.foo` is an error.
 - Tests: unit-test `parser`/`editor`/`table_view` logic; integration tests use
   `tempfile` or `.temp/` DBs, never the repo root.
 

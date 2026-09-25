@@ -5,7 +5,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::config::{QUIT_CONFIRM_TIMEOUT, SCROLLBACK_LIMIT};
+use crate::config::{
+    OUTPUT_SCROLL_LINE, OUTPUT_SCROLL_PAGE, QUIT_CONFIRM_TIMEOUT, SCROLLBACK_LIMIT,
+};
 use crate::db::{self, SchemaCache};
 use crate::editor::{Completer, History, InputBuffer};
 use crate::parser::{self, DotCommand, StatementKind};
@@ -40,7 +42,8 @@ pub enum LineKind {
     Warn,
 }
 
-/// Full application state. Rendered statelessly by `ui::render`.
+/// Full application state. Rendered by `ui::render` (which clamps
+/// `scroll_offset` to the current viewport so overscroll can't accumulate).
 pub struct App {
     pub db_path: PathBuf,
     pub mode: Mode,
@@ -119,12 +122,21 @@ impl App {
         self.scroll_offset = 0;
     }
 
+    /// Scroll the output viewport toward older lines (up).
+    /// Clamped lazily at render time against the current viewport height.
     pub fn scroll_output_up(&mut self, n: usize) {
         self.scroll_offset = self.scroll_offset.saturating_add(n);
     }
 
+    /// Scroll the output viewport toward newer lines (down, back to follow).
     pub fn scroll_output_down(&mut self, n: usize) {
         self.scroll_offset = self.scroll_offset.saturating_sub(n);
+    }
+
+    /// Drop every scrollback line and snap the viewport back to the bottom.
+    pub fn clear_output(&mut self) {
+        self.scrollback.clear();
+        self.scroll_offset = 0;
     }
 
     // -- quit confirmation ----------------------------------------------------
@@ -163,6 +175,15 @@ impl App {
                     return;
                 }
                 Mode::Input => {
+                    // Non-empty input: abort the draft (all lines), stay alive.
+                    // This is the escape hatch for unterminated multiline
+                    // statements (e.g. an unbalanced quote swallowing `;`).
+                    if !self.input.is_blank() {
+                        self.input.clear();
+                        self.completer.dismiss();
+                        self.disarm_quit();
+                        return;
+                    }
                     if self.is_quit_armed() {
                         self.should_quit = true;
                         self.completer.dismiss();
@@ -220,7 +241,9 @@ impl App {
             }
             KeyCode::Up => {
                 self.completer.dismiss();
-                if !self.input.move_up() {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.scroll_output_up(OUTPUT_SCROLL_LINE);
+                } else if !self.input.move_up() {
                     let cur = self.input.full_text();
                     if let Some(entry) = self.history.move_up(&cur) {
                         self.input.set_text(&entry);
@@ -229,7 +252,9 @@ impl App {
             }
             KeyCode::Down => {
                 self.completer.dismiss();
-                if !self.input.move_down()
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.scroll_output_down(OUTPUT_SCROLL_LINE);
+                } else if !self.input.move_down()
                     && self.history.browsing()
                     && let Some(entry) = self.history.move_down()
                 {
@@ -244,8 +269,8 @@ impl App {
                 self.completer.dismiss();
                 self.input.col = self.input.lines()[self.input.row].chars().count();
             }
-            KeyCode::PageUp => self.scroll_output_up(10),
-            KeyCode::PageDown => self.scroll_output_down(10),
+            KeyCode::PageUp => self.scroll_output_up(OUTPUT_SCROLL_PAGE),
+            KeyCode::PageDown => self.scroll_output_down(OUTPUT_SCROLL_PAGE),
             KeyCode::Char(ch) => {
                 self.completer.dismiss();
                 // Plain typing (modifiers other than Shift are shortcuts).
@@ -389,6 +414,11 @@ impl App {
                 }
                 Err(e) => self.push_line(db::friendly_query_error(&e), LineKind::Err),
             },
+            DotCommand::Clear => {
+                // `submit_input` already echoed `# .clear`; drop everything
+                // (history entry is kept) so the output is fully empty.
+                self.clear_output();
+            }
         }
         self.input.clear();
     }
@@ -443,7 +473,8 @@ impl App {
     }
 }
 
-/// Ctrl+C arms/confirms quit in input mode, closes the grid in table mode.
+/// Ctrl+C clears non-empty input, arms/confirms quit on empty input,
+/// and closes the grid in table mode.
 fn is_ctrl_c(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('c' | 'C')) && key.modifiers.contains(KeyModifiers::CONTROL)
 }
@@ -529,16 +560,63 @@ mod tests {
     }
 
     #[test]
-    fn input_stays_usable_after_first_ctrl_c() {
+    fn ctrl_c_clears_nonempty_input_instead_of_quitting() {
         let mut app = App::new(PathBuf::from("dummy.db"));
-        app.handle_key(ctrl_c());
-        assert!(app.is_quit_armed());
         type_text(&mut app, "select 1;");
-        assert_eq!(app.input.full_text(), "select 1;");
+        app.handle_key(ctrl_c());
+        assert_eq!(app.input.full_text(), "", "input cleared");
+        assert!(!app.should_quit, "must not quit with non-empty input");
+        assert!(!app.is_quit_armed(), "clear disarms a pending quit");
+        // Now empty: two presses quit as usual.
+        app.handle_key(ctrl_c());
+        assert!(!app.should_quit);
         assert!(app.is_quit_armed());
-        // Still quits on the confirming press.
         app.handle_key(ctrl_c());
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn ctrl_c_clears_all_lines_of_multiline_input() {
+        let mut app = App::new(PathBuf::from("dummy.db"));
+        // Simulate an unterminated draft (e.g. unbalanced quote swallowing `;`).
+        app.input
+            .set_text("select * from users\nwhere name = 'oops");
+        assert_eq!(app.input.lines().len(), 2);
+        app.handle_key(ctrl_c());
+        assert!(app.input.full_text().is_empty());
+        assert_eq!(app.input.lines().len(), 1);
+        assert!(!app.should_quit);
+        assert!(!app.is_quit_armed());
+    }
+
+    #[test]
+    fn ctrl_c_on_blank_input_arms_quit() {
+        let mut app = App::new(PathBuf::from("dummy.db"));
+        app.input.set_text("  \n ");
+        assert!(app.input.is_blank());
+        app.handle_key(ctrl_c());
+        assert!(app.is_quit_armed());
+        assert!(!app.should_quit);
+        app.handle_key(ctrl_c());
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn dot_clear_empties_scrollback_and_resets_scroll() {
+        let mut app = App::new(PathBuf::from("dummy.db"));
+        app.push_line("# select 1;", LineKind::Echo);
+        app.push_line("Error: boom", LineKind::Err);
+        app.scroll_output_up(10);
+        assert_eq!(app.scrollback.len(), 2);
+        app.input.set_text(".clear");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.scrollback.is_empty(), "all output cleared");
+        assert_eq!(app.scroll_offset, 0);
+        assert!(app.input.full_text().is_empty());
+        assert!(
+            app.history.entries().contains(&".clear".to_string()),
+            "history kept"
+        );
     }
 
     #[test]
@@ -609,6 +687,49 @@ mod tests {
             app.push_line(format!("line {i}"), LineKind::Echo);
         }
         assert_eq!(app.scrollback.len(), SCROLLBACK_LIMIT);
+    }
+
+    fn shift_key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::SHIFT,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        }
+    }
+
+    #[test]
+    fn shift_up_down_scrolls_output_without_touching_input() {
+        let mut app = App::new(PathBuf::from("dummy.db"));
+        app.history.push("select 1;".to_string());
+        app.handle_key(shift_key(KeyCode::Up));
+        assert_eq!(app.scroll_offset, crate::config::OUTPUT_SCROLL_LINE);
+        assert!(app.input.full_text().is_empty(), "input untouched");
+        assert!(!app.history.browsing(), "history untouched");
+        app.handle_key(shift_key(KeyCode::Down));
+        assert_eq!(app.scroll_offset, 0);
+        assert!(app.input.full_text().is_empty());
+    }
+
+    #[test]
+    fn pgup_pgdn_scroll_output_page() {
+        let mut app = App::new(PathBuf::from("dummy.db"));
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(app.scroll_offset, crate::config::OUTPUT_SCROLL_PAGE);
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn new_output_resets_manual_scroll_to_follow() {
+        let mut app = App::new(PathBuf::from("dummy.db"));
+        app.scroll_output_up(25);
+        assert_eq!(app.scroll_offset, 25);
+        app.push_line("latest", LineKind::Ok);
+        assert_eq!(
+            app.scroll_offset, 0,
+            "live follow regardless of manual scroll"
+        );
     }
 
     fn type_text(app: &mut App, text: &str) {
@@ -685,7 +806,17 @@ mod tests {
         app.handle_key(key(KeyCode::Up));
         assert_eq!(app.input.full_text(), "select * from nope;");
 
-        // Ctrl+C twice quits from input mode (first arms, second confirms).
+        // Ctrl+C with non-empty input clears it instead of quitting;
+        // two more presses on the now-empty input quit (arm + confirm).
+        app.handle_key(KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        });
+        assert!(!app.should_quit);
+        assert!(!app.is_quit_armed());
+        assert!(app.input.full_text().is_empty());
         app.handle_key(KeyEvent {
             code: KeyCode::Char('c'),
             modifiers: KeyModifiers::CONTROL,

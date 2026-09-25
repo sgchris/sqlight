@@ -1,5 +1,7 @@
 //! Ratatui rendering: input mode (scrollback + prompt) and table mode
-//! (full-screen grid). Stateless: everything derives from `App` each frame.
+//! (full-screen grid). Mostly stateless: everything derives from `App` each
+//! frame, except the scrollback viewport clamp writes back `scroll_offset`
+//! so overscroll can't accumulate past the top.
 
 use ratatui::{
     Frame,
@@ -19,7 +21,7 @@ use crate::config::{
 /// Max visual rows the input box may occupy (rest goes to scrollback).
 const MAX_INPUT_HEIGHT: u16 = 12;
 
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     if area.height < 5 || area.width < 20 {
         frame.render_widget(
@@ -36,7 +38,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 
 // -- input mode ---------------------------------------------------------------
 
-fn render_input(frame: &mut Frame, app: &App, area: Rect) {
+fn render_input(frame: &mut Frame, app: &mut App, area: Rect) {
     let input_h = input_visual_height(app, area.width).clamp(1, MAX_INPUT_HEIGHT);
     let chunks = Layout::vertical([
         Constraint::Min(1),
@@ -58,13 +60,13 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect) {
         render_status(
             frame,
             chunks[2],
-            "Enter run/newline · Tab complete · ↑↓ history · PgUp/PgDn output · Ctrl+C quit",
+            "Enter run/newline · Tab complete · ↑↓ history · Shift+↑↓/PgUp/PgDn output · Ctrl+C clear/quit",
             &app.db_path.to_string_lossy(),
         );
     }
 }
 
-fn render_scrollback(frame: &mut Frame, app: &App, area: Rect) {
+fn render_scrollback(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     for entry in &app.scrollback {
         let style = Style::default().fg(kind_color(entry.kind));
@@ -84,15 +86,51 @@ fn render_scrollback(frame: &mut Frame, app: &App, area: Rect) {
     }
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
-            "Connected. Type SQL ending with ; — or .tables — Ctrl+C to quit.",
+            "Connected. Type SQL ending with ; — or .tables/.clear — Ctrl+C to clear/quit.",
             Style::default().fg(COLOR_HINT),
         )));
     }
+    // Bottom-anchored viewport: `scroll_offset` is lines up from the bottom
+    // (0 = follow latest). Ratatui `scroll(n)` skips `n` wrapped rows from
+    // the top, so translate to `total - viewport - offset`. The offset is
+    // clamped back into `app` so repeated Shift+Up past the top can't
+    // accumulate unbounded overscroll that a single Shift+Down could never
+    // visibly undo.
+    let total = scrollback_visual_height(&lines, area.width);
+    let viewport = area.height as usize;
+    let max_offset = total.saturating_sub(viewport);
+    app.scroll_offset = app.scroll_offset.min(max_offset);
+    let first_visible = total
+        .saturating_sub(viewport)
+        .saturating_sub(app.scroll_offset);
     let text = Text::from(lines);
     let para = Paragraph::new(text)
         .wrap(Wrap { trim: false })
-        .scroll((app.scroll_offset.min(u16::MAX as usize) as u16, 0));
+        .scroll((first_visible.min(u16::MAX as usize) as u16, 0));
     frame.render_widget(para, area);
+}
+
+/// Wrapped visual rows the scrollback occupies at `width`.
+///
+/// Char-width `ceil` approximation, same as `input_visual_height`.
+/// Word-wrap may need slightly more rows, but this keeps the viewport
+/// pinned to the latest lines and is exact when nothing wraps.
+fn scrollback_visual_height(lines: &[Line], width: u16) -> usize {
+    if width == 0 {
+        return lines.len();
+    }
+    let w = width as usize;
+    lines
+        .iter()
+        .map(|line| {
+            let line_w: usize = line
+                .spans
+                .iter()
+                .map(|s| display_w(s.content.as_ref()))
+                .sum();
+            line_w.max(1).div_ceil(w)
+        })
+        .sum()
 }
 
 fn render_prompt(frame: &mut Frame, app: &App, area: Rect) {
@@ -407,7 +445,7 @@ mod tests {
         let mut app = App::new(PathBuf::from("demo.db"));
         app.push_line("# select 1;", LineKind::Echo);
         app.push_line("Error: boom", LineKind::Err);
-        term.draw(|f| render(f, &app)).expect("draw input");
+        term.draw(|f| render(f, &mut app)).expect("draw input");
         let text = screen_text(&term);
         assert!(text.contains("# "), "prompt visible");
         assert!(text.contains("boom"), "error line visible");
@@ -433,7 +471,7 @@ mod tests {
         view.toggle_wrap();
         app.table = Some(view);
         app.mode = Mode::Table;
-        term.draw(|f| render(f, &app)).expect("draw table");
+        term.draw(|f| render(f, &mut app)).expect("draw table");
         let text = screen_text(&term);
         assert!(text.contains("greg"), "row visible");
         assert!(text.contains("wrap: on"), "wrap state shown");
@@ -461,7 +499,7 @@ mod tests {
         assert!(!view.wrapped, "non-wrap mode");
         app.table = Some(view);
         app.mode = Mode::Table;
-        term.draw(|f| render(f, &app)).expect("draw table");
+        term.draw(|f| render(f, &mut app)).expect("draw table");
 
         let buf = term.backend().buffer();
         let w = buf.area.width as usize;
@@ -479,6 +517,83 @@ mod tests {
     }
 
     #[test]
+    fn scrollback_shows_latest_lines_by_default() {
+        // 80x10: input (1) + status (1) leave 8 rows for scrollback.
+        let backend = TestBackend::new(80, 10);
+        let mut term = Terminal::new(backend).expect("terminal");
+        let mut app = App::new(PathBuf::from("demo.db"));
+        for i in 0..30 {
+            app.push_line(format!("line {i:02}"), LineKind::Echo);
+        }
+        assert_eq!(app.scroll_offset, 0);
+        term.draw(|f| render(f, &mut app)).expect("draw input");
+        let text = screen_text(&term);
+        assert!(text.contains("line 29"), "latest line visible, got: {text}");
+        assert!(
+            !text.contains("line 00"),
+            "oldest line scrolled off, got: {text}"
+        );
+    }
+
+    #[test]
+    fn scrollback_manual_scroll_reveals_older_lines() {
+        let backend = TestBackend::new(80, 10);
+        let mut term = Terminal::new(backend).expect("terminal");
+        let mut app = App::new(PathBuf::from("demo.db"));
+        for i in 0..30 {
+            app.push_line(format!("line {i:02}"), LineKind::Echo);
+        }
+        // Scroll up far past the top: clamped to oldest at render time.
+        app.scroll_output_up(100);
+        term.draw(|f| render(f, &mut app)).expect("draw scrolled");
+        let text = screen_text(&term);
+        assert!(text.contains("line 00"), "oldest visible, got: {text}");
+        assert!(
+            !text.contains("line 29"),
+            "latest scrolled off, got: {text}"
+        );
+        // New output snaps back to the bottom regardless of manual scroll.
+        app.push_line("line 30".to_string(), LineKind::Echo);
+        assert_eq!(app.scroll_offset, 0);
+        term.draw(|f| render(f, &mut app)).expect("draw follow");
+        let text = screen_text(&term);
+        assert!(text.contains("line 30"), "follow latest, got: {text}");
+    }
+
+    #[test]
+    fn overscroll_past_top_does_not_stick() {
+        // 80x10 leaves 8 rows for scrollback; 30 lines => max offset 22.
+        let backend = TestBackend::new(80, 10);
+        let mut term = Terminal::new(backend).expect("terminal");
+        let mut app = App::new(PathBuf::from("demo.db"));
+        for i in 0..30 {
+            app.push_line(format!("line {i:02}"), LineKind::Echo);
+        }
+        // Hammer Shift+Up far past the top, rendering each frame as the
+        // real event loop does: the clamp must write back so offset never
+        // accumulates beyond the maximum.
+        for _ in 0..100 {
+            app.scroll_output_up(1);
+            term.draw(|f| render(f, &mut app)).expect("draw");
+        }
+        assert_eq!(
+            app.scroll_offset, 22,
+            "clamped to max, got: {}",
+            app.scroll_offset
+        );
+        // A single Shift+Down must now visibly move the viewport one row.
+        app.scroll_output_down(1);
+        assert_eq!(app.scroll_offset, 21);
+        term.draw(|f| render(f, &mut app)).expect("draw down");
+        let text = screen_text(&term);
+        assert!(
+            !text.contains("line 00"),
+            "viewport moved down off the top, got: {text}"
+        );
+        assert!(text.contains("line 08"), "next row in view, got: {text}");
+    }
+
+    #[test]
     fn renders_quit_confirm_and_reverts() {
         use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
         use std::time::Duration;
@@ -493,7 +608,7 @@ mod tests {
             state: KeyEventState::empty(),
         };
         app.handle_key(ctrl_c);
-        term.draw(|f| render(f, &app)).expect("draw confirm");
+        term.draw(|f| render(f, &mut app)).expect("draw confirm");
         let text = screen_text(&term);
         assert!(
             text.contains(QUIT_CONFIRM_MESSAGE),
@@ -506,7 +621,7 @@ mod tests {
                 - Duration::from_millis(10),
         );
         assert!(app.expire_quit_arm());
-        term.draw(|f| render(f, &app)).expect("draw reverted");
+        term.draw(|f| render(f, &mut app)).expect("draw reverted");
         let text = screen_text(&term);
         assert!(
             !text.contains(QUIT_CONFIRM_MESSAGE),

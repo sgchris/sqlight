@@ -31,6 +31,7 @@ Internal commands (no `;` needed):
 
 - `.tables` — list tables, one per row
 - `.schema TABLE_NAME` — show `CREATE TABLE` + index statements for the table
+- `.clear` — clear all output
 
 ### Keys
 
@@ -39,11 +40,13 @@ Internal commands (no `;` needed):
 | `Enter` | Run (if `;`-terminated or dot-command) else newline |
 | `Tab` / `Shift+Tab` | Autocomplete next/previous (needs ≥2 chars) |
 | `Up` / `Down` | History (whole multiline entry, caret to end) or move within buffer |
+| `Shift+Up` / `Shift+Down`, `PgUp` / `PgDn` (in prompt) | Scroll output (latest shown by default) |
 | `Left` / `Right`, `Backspace`, `Delete` | Edit |
 | `Esc` | Close autocomplete popup, or exit table view back to prompt |
 | `w` (in table) | Wrap/unwrap long values (wrap shows up to 8 lines) |
 | `Up`/`Down`/`Left`/`Right`, `PgUp`/`PgDn` (in table) | Scroll grid |
-| `Ctrl+C` (in prompt) | Quit (press twice within 3s to confirm) |
+| `Ctrl+C` (in prompt, empty input) | Quit (press twice within 3s to confirm) |
+| `Ctrl+C` (in prompt, with input) | Clear input (all lines) |
 | `Ctrl+C` (in table) | Back to prompt |
 | `Ctrl+D` | Quit anywhere |
 
