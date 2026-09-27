@@ -1,11 +1,21 @@
 # SQLight
 
-A convenient terminal (TUI) client for SQLite — a friendlier alternative to the
-`sqlite3` CLI, with multiline editing, `TAB` autocomplete and a scrollable
-results grid.
+A convenient terminal (TUI) client for **SQLite** and **PostgreSQL** — a
+friendlier alternative to the `sqlite3` / `psql` CLIs, with multiline editing,
+`TAB` autocomplete and a scrollable results grid.
+
+More database backends are planned; connection types that are not yet implemented
+are rejected with a clear error and do not affect other entries in your config.
 
 <img width="1115" height="628" alt="image" src="https://github.com/user-attachments/assets/f97e4a9e-642d-4d00-9e72-b47786ee1816" />
 
+
+## Supported databases
+
+| Backend      | How you connect |
+|--------------|-----------------|
+| **SQLite**   | Path to an existing `.db` file (or any SQLite database path) |
+| **PostgreSQL** | Named entry in `~/.config/sqlight/connections.json` |
 
 ## Install / run
 
@@ -39,8 +49,8 @@ connection). Running `sqlight` with no argument prints the full expected path.
 - `port` is an integer; the other fields are strings.
 - Without a `password` key you are prompted for it (hidden input).
   `"password": ""` means an empty password.
-- Only `postgresql` is supported for now; other types (e.g. `mysql`) are
-  reported as unsupported when selected and don't affect other entries.
+- Use `"type": "postgresql"` for Postgres; additional `type` values will be
+  added over time.
 - TLS is preferred: the connection is encrypted when the server supports it
   (certificates are not verified, like libpq `sslmode=prefer`), else plain.
 - Failed connections exit with an error before the UI starts. Everything else
