@@ -214,17 +214,21 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
     // Compose padded text lines (manual grid: full control over H-scroll +
     // variable row heights, no TableState API drift across versions).
     // Headers, separator and every row share the same visible columns and
-    // the same fixed `col_widths`, so `←/→` scrolls them together and all
+    // the same per-frame `widths`, so `←/→` scrolls them together and all
     // columns stay aligned. Every cell is padded to its column width;
-    // wrap mode reflows text inside the same width.
+    // wrap mode reflows text inside the same width. Widths are fitted to
+    // the inner viewport (inside the border), so long values grow into
+    // free space and resizing reflows the grid.
+    let inner_w = chunks[0].width.saturating_sub(2) as usize;
+    let widths = crate::table_view::fit_widths(&table.natural_widths, inner_w);
     let visible: Vec<usize> = visible_cols(table).collect();
     let headers: Vec<String> = visible
         .iter()
-        .map(|&c| pad_to(table.col_widths[c], &table.headers[c]))
+        .map(|&c| pad_to(widths[c], &table.headers[c]))
         .collect();
     let sep = visible
         .iter()
-        .map(|&c| "─".repeat(table.col_widths[c]))
+        .map(|&c| "─".repeat(widths[c]))
         .collect::<Vec<_>>()
         .join("─┼─");
     let header_line = Line::from(Span::styled(headers.join(" │ "), Style::default().bold()));
@@ -236,18 +240,20 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
     // exactly one terminal row; clip to the inner width/height instead of
     // the outer chunk, otherwise the 1-2 overflow chars wrap onto a
     // second visual line (most visible as a near-empty second row).
-    let inner_w = chunks[0].width.saturating_sub(2) as usize;
     let inner_h = chunks[0].height.saturating_sub(2) as usize;
     let body_h = inner_h.saturating_sub(2); // minus header+sep
     let mut used = 0usize;
     for r in table.offset_y..table.row_count() {
-        let h = table.row_height(r).max(1);
+        let h = table.row_height(r, &widths).max(1);
         if used + h > body_h.max(1) {
             break;
         }
         if table.wrapped {
             // Multi-line row: stack wrapped cell lines side by side.
-            let cells: Vec<Vec<String>> = visible.iter().map(|&c| table.cell_lines(r, c)).collect();
+            let cells: Vec<Vec<String>> = visible
+                .iter()
+                .map(|&c| table.cell_lines(r, c, widths[c]))
+                .collect();
             for li in 0..h {
                 let parts: Vec<String> = cells
                     .iter()
@@ -255,8 +261,8 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
                     .map(|(vi, cell)| {
                         let col = visible[vi];
                         cell.get(li)
-                            .map(|s| pad_to(table.col_widths[col], s))
-                            .unwrap_or_else(|| " ".repeat(table.col_widths[col]))
+                            .map(|s| pad_to(widths[col], s))
+                            .unwrap_or_else(|| " ".repeat(widths[col]))
                     })
                     .collect();
                 let style = if r % 2 == 1 {
@@ -271,11 +277,11 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
                 .iter()
                 .map(|&c| {
                     let s = table
-                        .cell_lines(r, c)
+                        .cell_lines(r, c, widths[c])
                         .into_iter()
                         .next()
                         .unwrap_or_default();
-                    pad_to(table.col_widths[c], &s)
+                    pad_to(widths[c], &s)
                 })
                 .collect();
             let style = if r % 2 == 1 {
@@ -478,6 +484,27 @@ mod tests {
         assert!(text.contains("truncated"), "truncation note shown");
         assert!(text.contains("ESC back"), "help shown");
         assert!(text.contains("Ctrl+C back"), "table Ctrl+C goes back");
+    }
+
+    #[test]
+    fn renders_long_value_in_full_when_screen_is_wide() {
+        use crate::db::QueryResult;
+        use crate::table_view::TableView;
+
+        let long = format!("start-{}-finish", "x".repeat(50));
+        let backend = TestBackend::new(120, 10);
+        let mut term = Terminal::new(backend).expect("terminal");
+        let mut app = App::new(crate::db::Database::Sqlite(PathBuf::from("demo.db")));
+        app.table = Some(TableView::new(QueryResult {
+            headers: vec!["id".to_string(), "body".to_string()],
+            rows: vec![vec!["1".to_string(), long.clone()]],
+            truncated: false,
+        }));
+        app.mode = Mode::Table;
+        term.draw(|f| render(f, &mut app)).expect("draw table");
+        let text = screen_text(&term);
+        assert!(text.contains(&long), "long value shown untruncated");
+        assert!(!text.contains("..."), "no truncation marker");
     }
 
     #[test]

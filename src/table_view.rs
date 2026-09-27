@@ -12,7 +12,9 @@ pub struct TableView {
     pub headers: Vec<String>,
     pub rows: Vec<Vec<String>>,
     pub truncated: bool,
-    pub col_widths: Vec<usize>,
+    /// Width each column needs to show every value untruncated
+    /// (screen fitting happens per frame via `fit_widths`).
+    pub natural_widths: Vec<usize>,
     pub wrapped: bool,
     /// First visible data row.
     pub offset_y: usize,
@@ -22,12 +24,12 @@ pub struct TableView {
 
 impl TableView {
     pub fn new(result: QueryResult) -> Self {
-        let col_widths = compute_widths(&result.headers, &result.rows);
+        let natural_widths = natural_widths(&result.headers, &result.rows);
         Self {
             headers: result.headers,
             rows: result.rows,
             truncated: result.truncated,
-            col_widths,
+            natural_widths,
             wrapped: false,
             offset_y: 0,
             offset_x: 0,
@@ -66,15 +68,15 @@ impl TableView {
         }
     }
 
-    /// Rendered lines for one cell (wrapped or single truncated line).
-    pub fn cell_lines(&self, row: usize, col: usize) -> Vec<String> {
+    /// Rendered lines for one cell (wrapped or single truncated line)
+    /// at the given on-screen column `width`.
+    pub fn cell_lines(&self, row: usize, col: usize, width: usize) -> Vec<String> {
         let raw = self
             .rows
             .get(row)
             .and_then(|r| r.get(col))
             .map(String::as_str)
             .unwrap_or("");
-        let width = self.col_widths.get(col).copied().unwrap_or(MIN_COL_WIDTH);
         if self.wrapped {
             wrap_text(raw, width, MAX_WRAP_LINES)
         } else {
@@ -83,20 +85,59 @@ impl TableView {
     }
 
     /// Height (in terminal rows) of a data row under the current mode.
-    pub fn row_height(&self, row: usize) -> usize {
+    pub fn row_height(&self, row: usize, widths: &[usize]) -> usize {
         if !self.wrapped {
             return 1;
         }
         (0..self.col_count())
-            .map(|c| self.cell_lines(row, c).len().max(1))
+            .map(|c| {
+                let w = widths.get(c).copied().unwrap_or(MIN_COL_WIDTH);
+                self.cell_lines(row, c, w).len().max(1)
+            })
             .max()
             .unwrap_or(1)
     }
 }
 
-/// Column widths clamped to `[MIN_COL_WIDTH, MAX_COL_WIDTH]` using
-/// display width (Unicode-aware).
-pub fn compute_widths(headers: &[String], rows: &[Vec<String>]) -> Vec<usize> {
+/// Display width of the ` │ ` column separator.
+pub const COL_SEP_WIDTH: usize = 3;
+
+/// On-screen widths for `natural` columns within `available` display
+/// columns. Columns start capped at `MAX_COL_WIDTH`; any leftover width
+/// is shared evenly among columns that are still truncated, and a column
+/// that becomes fully visible hands its unused share to the others. When
+/// the capped columns already overflow, they are returned unchanged (the
+/// grid scrolls horizontally).
+pub fn fit_widths(natural: &[usize], available: usize) -> Vec<usize> {
+    let mut widths: Vec<usize> = natural.iter().map(|&w| w.min(MAX_COL_WIDTH)).collect();
+    let used = widths.iter().sum::<usize>() + COL_SEP_WIDTH * widths.len().saturating_sub(1);
+    let mut budget = available.saturating_sub(used);
+    while budget > 0 {
+        let needy: Vec<usize> = (0..widths.len())
+            .filter(|&c| widths[c] < natural[c])
+            .collect();
+        if needy.is_empty() {
+            break;
+        }
+        let share = budget / needy.len();
+        if share == 0 {
+            for &c in needy.iter().take(budget) {
+                widths[c] += 1;
+            }
+            break;
+        }
+        for c in needy {
+            let add = share.min(natural[c] - widths[c]);
+            widths[c] += add;
+            budget -= add;
+        }
+    }
+    widths
+}
+
+/// Width each column needs to show every value in full (at least
+/// `MIN_COL_WIDTH`), using display width (Unicode-aware).
+pub fn natural_widths(headers: &[String], rows: &[Vec<String>]) -> Vec<usize> {
     headers
         .iter()
         .enumerate()
@@ -110,7 +151,7 @@ pub fn compute_widths(headers: &[String], rows: &[Vec<String>]) -> Vec<usize> {
                     w = w.max(UnicodeWidthStr::width(first));
                 }
             }
-            w.min(MAX_COL_WIDTH)
+            w
         })
         .collect()
 }
@@ -197,15 +238,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn widths_clamped() {
+    fn natural_widths_uncapped() {
         let headers = vec!["id".to_string(), "name".to_string()];
-        let rows = vec![vec![
-            "1".to_string(),
-            "a-very-long-value-that-exceeds-maximum-width".to_string(),
-        ]];
-        let w = compute_widths(&headers, &rows);
-        assert_eq!(w[0], MIN_COL_WIDTH);
-        assert_eq!(w[1], MAX_COL_WIDTH);
+        let long = "a-very-long-value-that-exceeds-maximum-width";
+        let rows = vec![vec!["1".to_string(), long.to_string()]];
+        let w = natural_widths(&headers, &rows);
+        assert_eq!(w, vec![MIN_COL_WIDTH, long.len()]);
+    }
+
+    #[test]
+    fn fit_uses_natural_widths_when_they_fit() {
+        assert_eq!(fit_widths(&[8, 45], 100), vec![8, 45]);
+    }
+
+    #[test]
+    fn fit_shares_free_space_between_long_columns() {
+        // Capped: 8 + 30 + 30 + 2*3 = 74; 26 left for two truncated columns.
+        assert_eq!(fit_widths(&[8, 100, 100], 100), vec![8, 43, 43]);
+        // A column satisfied early hands its surplus to the other one.
+        assert_eq!(fit_widths(&[8, 35, 100], 100), vec![8, 35, 51]);
+    }
+
+    #[test]
+    fn fit_keeps_capped_widths_when_overflowing() {
+        assert_eq!(fit_widths(&[50, 50, 50], 60), vec![30, 30, 30]);
     }
 
     #[test]
