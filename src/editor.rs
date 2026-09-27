@@ -235,6 +235,106 @@ impl InputBuffer {
         }
     }
 
+    pub fn move_line_start(&mut self) {
+        self.col = 0;
+    }
+
+    pub fn move_line_end(&mut self) {
+        self.col = self.char_count(self.row);
+    }
+
+    /// Char column of the previous word start (readline `M-b`) on this line.
+    fn prev_word_col(&self) -> usize {
+        let chars: Vec<char> = self.lines[self.row].chars().collect();
+        let mut i = self.col.min(chars.len());
+        while i > 0 && !is_nav_word_char(chars[i - 1]) {
+            i -= 1;
+        }
+        while i > 0 && is_nav_word_char(chars[i - 1]) {
+            i -= 1;
+        }
+        i
+    }
+
+    /// Char column just past the next word end (readline `M-f`) on this line.
+    fn next_word_col(&self) -> usize {
+        let chars: Vec<char> = self.lines[self.row].chars().collect();
+        let mut i = self.col.min(chars.len());
+        while i < chars.len() && !is_nav_word_char(chars[i]) {
+            i += 1;
+        }
+        while i < chars.len() && is_nav_word_char(chars[i]) {
+            i += 1;
+        }
+        i
+    }
+
+    /// Move to the previous word start; at line start, wrap to previous line end.
+    pub fn move_word_left(&mut self) {
+        if self.col == 0 {
+            self.move_left();
+        } else {
+            self.col = self.prev_word_col();
+        }
+    }
+
+    /// Move past the next word end; at line end, wrap to next line start.
+    pub fn move_word_right(&mut self) {
+        if self.col >= self.char_count(self.row) {
+            self.move_right();
+        } else {
+            self.col = self.next_word_col();
+        }
+    }
+
+    /// Remove chars `[from, to)` on the current line and park the cursor at `from`.
+    fn delete_range(&mut self, from: usize, to: usize) {
+        let line = &mut self.lines[self.row];
+        let chars: Vec<char> = line.chars().collect();
+        let to = to.min(chars.len());
+        *line = chars[..from].iter().chain(&chars[to..]).collect();
+        self.col = from;
+    }
+
+    /// Delete the word before the cursor (Option/Alt+Backspace, Ctrl+W).
+    pub fn delete_word_before(&mut self) -> bool {
+        if self.col == 0 {
+            return self.backspace();
+        }
+        let from = self.prev_word_col();
+        self.delete_range(from, self.col);
+        true
+    }
+
+    /// Delete the word after the cursor (Option/Alt+Delete, Alt+D).
+    pub fn delete_word_after(&mut self) -> bool {
+        if self.col >= self.char_count(self.row) {
+            return self.delete_forward();
+        }
+        let to = self.next_word_col();
+        self.delete_range(self.col, to);
+        true
+    }
+
+    /// Delete from line start to the cursor (Cmd+Backspace, Ctrl+U).
+    pub fn delete_to_line_start(&mut self) -> bool {
+        if self.col == 0 {
+            return self.backspace();
+        }
+        self.delete_range(0, self.col);
+        true
+    }
+
+    /// Delete from the cursor to line end (Cmd+Delete, Ctrl+K).
+    pub fn delete_to_line_end(&mut self) -> bool {
+        let max = self.char_count(self.row);
+        if self.col >= max {
+            return self.delete_forward();
+        }
+        self.delete_range(self.col, max);
+        true
+    }
+
     /// Returns false when already at the first line (caller may use history).
     pub fn move_up(&mut self) -> bool {
         if self.row > 0 {
@@ -288,6 +388,11 @@ impl InputBuffer {
 
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '.' || c == '"'
+}
+
+/// Word chars for cursor movement / word deletion (stops at `.` and quotes).
+fn is_nav_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 /// Up/Down command history. Multiline entries stored whole.
@@ -578,6 +683,53 @@ mod tests {
         assert_eq!(w, "us");
         b.replace_word_before_cursor("users");
         assert_eq!(b.full_text(), "select users");
+    }
+
+    #[test]
+    fn word_navigation_and_deletion() {
+        let mut b = InputBuffer::new();
+        b.set_text("select  u.name from");
+        b.move_word_left();
+        assert_eq!(b.col, 15);
+        b.move_word_left();
+        assert_eq!(b.col, 10);
+        b.move_word_left();
+        assert_eq!(b.col, 8);
+        b.move_word_right();
+        assert_eq!(b.col, 9);
+        b.move_line_start();
+        b.move_word_right();
+        assert_eq!(b.col, 6);
+        b.move_line_end();
+        assert!(b.delete_word_before());
+        assert_eq!(b.full_text(), "select  u.name ");
+        b.move_line_start();
+        assert!(b.delete_word_after());
+        assert_eq!(b.full_text(), "  u.name ");
+    }
+
+    #[test]
+    fn word_moves_cross_line_boundaries() {
+        let mut b = InputBuffer::new();
+        b.set_text("ab\ncd");
+        b.row = 1;
+        b.col = 0;
+        b.move_word_left();
+        assert_eq!((b.row, b.col), (0, 2));
+        b.move_word_right();
+        assert_eq!((b.row, b.col), (1, 0));
+    }
+
+    #[test]
+    fn line_kill_commands() {
+        let mut b = InputBuffer::new();
+        b.set_text("héllo wörld");
+        b.col = 6;
+        assert!(b.delete_to_line_start());
+        assert_eq!((b.full_text().as_str(), b.col), ("wörld", 0));
+        b.col = 2;
+        assert!(b.delete_to_line_end());
+        assert_eq!(b.full_text(), "wö");
     }
 
     #[test]

@@ -59,6 +59,8 @@ pub struct App {
     /// Lines scrolled up from the bottom of the scrollback (0 = follow).
     pub scroll_offset: usize,
     pub table: Option<TableView>,
+    /// SELECT that produced `table`; re-run by `r` in table mode.
+    pub table_sql: Option<String>,
     pub should_quit: bool,
     /// First Ctrl+C timestamp in input mode; second one within the
     /// timeout confirms quit.
@@ -78,6 +80,7 @@ impl App {
             scrollback: Vec::new(),
             scroll_offset: 0,
             table: None,
+            table_sql: None,
             should_quit: false,
             quit_armed_at: None,
         }
@@ -208,7 +211,59 @@ impl App {
         }
     }
 
+    /// Word/line navigation and deletion shortcuts. Covers the variants
+    /// macOS terminals emit: Option as Alt (or `ESC b`/`ESC f`), Cmd as
+    /// Super (kitty protocol) or translated to Home/End, Ctrl+A/E/U/K.
+    /// Returns true when the key was consumed.
+    fn handle_edit_shortcut(&mut self, key: KeyEvent) -> bool {
+        let m = key.modifiers;
+        let alt = m.contains(KeyModifiers::ALT);
+        let ctrl = m.contains(KeyModifiers::CONTROL);
+        let sup = m.contains(KeyModifiers::SUPER);
+        let input = &mut self.input;
+        match key.code {
+            KeyCode::Left if sup => input.move_line_start(),
+            KeyCode::Right if sup => input.move_line_end(),
+            KeyCode::Left if alt || ctrl => input.move_word_left(),
+            KeyCode::Right if alt || ctrl => input.move_word_right(),
+            KeyCode::Char('b' | 'B') if alt => input.move_word_left(),
+            KeyCode::Char('f' | 'F') if alt => input.move_word_right(),
+            KeyCode::Char('a' | 'A') if ctrl => input.move_line_start(),
+            KeyCode::Char('e' | 'E') if ctrl => input.move_line_end(),
+            KeyCode::Backspace if sup => {
+                input.delete_to_line_start();
+            }
+            KeyCode::Backspace if alt || ctrl => {
+                input.delete_word_before();
+            }
+            KeyCode::Char('w' | 'W') if ctrl => {
+                input.delete_word_before();
+            }
+            KeyCode::Char('u' | 'U') if ctrl => {
+                input.delete_to_line_start();
+            }
+            KeyCode::Delete if sup => {
+                input.delete_to_line_end();
+            }
+            KeyCode::Delete if alt || ctrl => {
+                input.delete_word_after();
+            }
+            KeyCode::Char('d' | 'D') if alt => {
+                input.delete_word_after();
+            }
+            KeyCode::Char('k' | 'K') if ctrl => {
+                input.delete_to_line_end();
+            }
+            _ => return false,
+        }
+        self.completer.dismiss();
+        true
+    }
+
     fn handle_input_key(&mut self, key: KeyEvent) {
+        if self.handle_edit_shortcut(key) {
+            return;
+        }
         match key.code {
             KeyCode::Enter => {
                 self.completer.dismiss();
@@ -263,11 +318,11 @@ impl App {
             }
             KeyCode::Home => {
                 self.completer.dismiss();
-                self.input.col = 0;
+                self.input.move_line_start();
             }
             KeyCode::End => {
                 self.completer.dismiss();
-                self.input.col = self.input.lines()[self.input.row].chars().count();
+                self.input.move_line_end();
             }
             KeyCode::PageUp => self.scroll_output_up(OUTPUT_SCROLL_PAGE),
             KeyCode::PageDown => self.scroll_output_down(OUTPUT_SCROLL_PAGE),
@@ -291,6 +346,7 @@ impl App {
                 }
             }
             KeyCode::Char('q' | 'Q') if key.modifiers.is_empty() => self.close_table(),
+            KeyCode::Char('r' | 'R') if key.modifiers.is_empty() => self.refresh_table(),
             KeyCode::Up => self.table.as_mut().map(|t| t.scroll_up(1)).unwrap_or(()),
             KeyCode::Down => self.table.as_mut().map(|t| t.scroll_down(1)).unwrap_or(()),
             KeyCode::Left => self.table.as_mut().map(|t| t.scroll_left(1)).unwrap_or(()),
@@ -315,7 +371,33 @@ impl App {
     fn close_table(&mut self) {
         self.mode = Mode::Input;
         self.table = None;
+        self.table_sql = None;
         self.completer.dismiss();
+    }
+
+    /// Re-run the grid's SELECT, keeping wrap mode and (clamped) scroll.
+    /// On failure the error goes to scrollback and the grid closes.
+    fn refresh_table(&mut self) {
+        let Some(sql) = self.table_sql.clone() else {
+            return;
+        };
+        match self.db.query_select(&sql) {
+            Ok(result) => {
+                let mut view = TableView::new(result);
+                if let Some(old) = &self.table {
+                    if old.wrapped != view.wrapped {
+                        view.toggle_wrap();
+                    }
+                    view.offset_y = old.offset_y.min(view.row_count().saturating_sub(1));
+                    view.offset_x = old.offset_x.min(view.headers.len().saturating_sub(1));
+                }
+                self.table = Some(view);
+            }
+            Err(e) => {
+                self.close_table();
+                self.push_line(e.message(), LineKind::Err);
+            }
+        }
     }
 
     fn tab_complete(&mut self, shift: bool) {
@@ -436,6 +518,7 @@ impl App {
                 }
                 let truncated = result.truncated;
                 self.table = Some(TableView::new(result));
+                self.table_sql = Some(sql.to_string());
                 self.mode = Mode::Table;
                 if truncated {
                     // Remembered for the table footer; also visible in history.
@@ -833,6 +916,51 @@ mod tests {
         });
         assert!(app.should_quit);
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn mod_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        }
+    }
+
+    #[test]
+    fn mac_style_word_and_line_shortcuts() {
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
+        type_text(&mut app, "select name from users");
+        app.handle_key(mod_key(KeyCode::Left, KeyModifiers::ALT));
+        assert_eq!(app.input.col, 17);
+        app.handle_key(mod_key(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert_eq!(app.input.col, 12);
+        app.handle_key(mod_key(KeyCode::Right, KeyModifiers::CONTROL));
+        assert_eq!(app.input.col, 16);
+        app.handle_key(mod_key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(app.input.col, 0);
+        app.handle_key(mod_key(KeyCode::Right, KeyModifiers::SUPER));
+        assert_eq!(app.input.col, 22);
+        app.handle_key(mod_key(KeyCode::Backspace, KeyModifiers::ALT));
+        assert_eq!(app.input.full_text(), "select name from ");
+        app.handle_key(mod_key(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(app.input.full_text(), "");
+    }
+
+    #[test]
+    fn table_refresh_reruns_query() {
+        let path = seed_e2e_db();
+        let mut app = App::new(Database::Sqlite(path.clone()));
+        type_text(&mut app, "select * from users;");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.table.as_ref().expect("table").row_count(), 2);
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.execute("INSERT INTO users (name) VALUES ('zed')", [])
+            .expect("insert");
+        app.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(app.mode, Mode::Table);
+        assert_eq!(app.table.as_ref().expect("table").row_count(), 3);
         let _ = std::fs::remove_file(&path);
     }
 
