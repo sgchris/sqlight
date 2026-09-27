@@ -61,7 +61,7 @@ fn render_input(frame: &mut Frame, app: &mut App, area: Rect) {
             frame,
             chunks[2],
             "Enter run/newline · Tab complete · ↑↓ history · Shift+↑↓/PgUp/PgDn output · Ctrl+C clear/quit",
-            &app.db_path.to_string_lossy(),
+            &app.db.label(),
         );
     }
 }
@@ -442,7 +442,7 @@ mod tests {
     fn renders_input_mode() {
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).expect("terminal");
-        let mut app = App::new(PathBuf::from("demo.db"));
+        let mut app = App::new(crate::db::Database::Sqlite(PathBuf::from("demo.db")));
         app.push_line("# select 1;", LineKind::Echo);
         app.push_line("Error: boom", LineKind::Err);
         term.draw(|f| render(f, &mut app)).expect("draw input");
@@ -459,7 +459,7 @@ mod tests {
 
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).expect("terminal");
-        let mut app = App::new(PathBuf::from("demo.db"));
+        let mut app = App::new(crate::db::Database::Sqlite(PathBuf::from("demo.db")));
         let mut view = TableView::new(QueryResult {
             headers: vec!["id".to_string(), "name".to_string()],
             rows: vec![
@@ -490,7 +490,7 @@ mod tests {
         // 2 chars onto a second visual line.
         let backend = TestBackend::new(40, 10);
         let mut term = Terminal::new(backend).expect("terminal");
-        let mut app = App::new(PathBuf::from("demo.db"));
+        let mut app = App::new(crate::db::Database::Sqlite(PathBuf::from("demo.db")));
         let view = TableView::new(QueryResult {
             headers: vec!["c1".to_string(), "c2".to_string()],
             rows: vec![vec!["X".repeat(20), "Y".repeat(20)]],
@@ -521,7 +521,7 @@ mod tests {
         // 80x10: input (1) + status (1) leave 8 rows for scrollback.
         let backend = TestBackend::new(80, 10);
         let mut term = Terminal::new(backend).expect("terminal");
-        let mut app = App::new(PathBuf::from("demo.db"));
+        let mut app = App::new(crate::db::Database::Sqlite(PathBuf::from("demo.db")));
         for i in 0..30 {
             app.push_line(format!("line {i:02}"), LineKind::Echo);
         }
@@ -539,7 +539,7 @@ mod tests {
     fn scrollback_manual_scroll_reveals_older_lines() {
         let backend = TestBackend::new(80, 10);
         let mut term = Terminal::new(backend).expect("terminal");
-        let mut app = App::new(PathBuf::from("demo.db"));
+        let mut app = App::new(crate::db::Database::Sqlite(PathBuf::from("demo.db")));
         for i in 0..30 {
             app.push_line(format!("line {i:02}"), LineKind::Echo);
         }
@@ -565,7 +565,7 @@ mod tests {
         // 80x10 leaves 8 rows for scrollback; 30 lines => max offset 22.
         let backend = TestBackend::new(80, 10);
         let mut term = Terminal::new(backend).expect("terminal");
-        let mut app = App::new(PathBuf::from("demo.db"));
+        let mut app = App::new(crate::db::Database::Sqlite(PathBuf::from("demo.db")));
         for i in 0..30 {
             app.push_line(format!("line {i:02}"), LineKind::Echo);
         }
@@ -600,7 +600,7 @@ mod tests {
 
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).expect("terminal");
-        let mut app = App::new(PathBuf::from("demo.db"));
+        let mut app = App::new(crate::db::Database::Sqlite(PathBuf::from("demo.db")));
         let ctrl_c = KeyEvent {
             code: KeyCode::Char('c'),
             modifiers: KeyModifiers::CONTROL,

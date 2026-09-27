@@ -17,6 +17,37 @@ cargo build --release
 The DB file must already exist. If it is missing, inaccessible or locked,
 SQLight exits with a message on stderr (it never creates the file for you).
 
+### PostgreSQL (named connections)
+
+```sh
+./target/release/sqlight prod1
+```
+
+If the argument is not an existing file, SQLight looks it up by name in
+`~/.config/sqlight/connections.json` (a file always wins over a same-named
+connection). Running `sqlight` with no argument prints the full expected path.
+
+```json
+{
+  "prod1":    {"type": "postgresql", "host": "db.example.test", "port": 5432,
+               "database": "app", "user": "reader", "password": "..."},
+  "staging1": {"type": "postgresql", "host": "staging.example.test", "port": 5432,
+               "database": "app", "user": "reader"}
+}
+```
+
+- `port` is an integer; the other fields are strings.
+- Without a `password` key you are prompted for it (hidden input).
+  `"password": ""` means an empty password.
+- Only `postgresql` is supported for now; other types (e.g. `mysql`) are
+  reported as unsupported when selected and don't affect other entries.
+- TLS is preferred: the connection is encrypted when the server supports it
+  (certificates are not verified, like libpq `sslmode=prefer`), else plain.
+- Failed connections exit with an error before the UI starts. Everything else
+  (autocomplete, `.tables`, `.schema`, grid, history) works as with SQLite.
+  `.schema` reconstructs DDL from the catalog; tables outside `public` are
+  listed as `schema.table`.
+
 ## Usage
 
 You get a `# ` prompt. Type SQL ending with `;` and hit `Enter` to run it.
@@ -69,6 +100,8 @@ and rebuild. There is no live config file.
 
 ## Tech
 
-Rust + Ratatui (crossterm backend) + rusqlite (bundled SQLite).
-Each statement opens its own short-lived connection (`busy_timeout`), so the
-DB file is locked only for the duration of the query.
+Rust + Ratatui (crossterm backend) + rusqlite (bundled SQLite) + `postgres`.
+For SQLite each statement opens its own short-lived connection
+(`busy_timeout`), so the DB file is locked only for the duration of the query.
+PostgreSQL keeps one session open; `SELECT`s are read through a server-side
+cursor capped at `MAX_ROWS`.

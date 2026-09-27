@@ -6,11 +6,17 @@ OpenCode, etc.) and human contributors. Keep it harness-agnostic.
 ## Project map
 
 - `src/main.rs` — startup (arg/file preflight), terminal init/restore, event loop.
-- `src/cli.rs` — clap arg parsing (exactly one `DB_PATH`).
+- `src/cli.rs` — clap arg parsing (optional `TARGET`; missing prints usage).
 - `src/config.rs` — ALL tunable constants (prompt, widths, row caps, colors).
   Change values here, never hardcode elsewhere.
-- `src/db.rs` — SQLite access. Open-per-statement (`Connection::open` +
-  `busy_timeout`), never hold a global connection.
+- `src/connections.rs` — resolves `TARGET`: existing SQLite file first, else a
+  named entry in `~/.config/sqlight/connections.json`.
+- `src/db/mod.rs` — `Database` enum (backend dispatch), `DbError`, shared types.
+- `src/db/sqlite.rs` — SQLite access. Open-per-statement (`Connection::open` +
+  `busy_timeout`), never hold a global SQLite connection.
+- `src/db/postgres.rs` — PostgreSQL: one persistent session, TLS preferred,
+  cursor-capped SELECTs. Live tests are `#[ignore]`d; run with
+  `SQLIGHT_TEST_PG="host=... port=... dbname=... user=... password=..." cargo test -- --ignored`.
 - `src/parser.rs` — trailing-`;` detection (string/comment aware),
   statement classification, dot-command parsing. Pure functions, unit-test them.
 - `src/editor.rs` — `InputBuffer` (multiline, char-based cursor), `History`,
@@ -38,8 +44,8 @@ Run `fmt` + `clippy` + `test` before every commit. Keep `cargo build` warning-fr
 - Ratatui is immediate-mode: build stateless `render()` from `App` each frame;
   keep cursor/scroll in state structs, handle resize by redrawing.
 - rusqlite with `bundled` feature; map `rusqlite::Error` to user-facing
-  `Error: ...` lines, never panic on SQL errors. File IO failures pre-TUI exit
-  via stderr + non-zero code.
+  `Error: ...` lines (via `DbError`), never panic on SQL errors. File IO,
+  config and connection failures pre-TUI exit via stderr + non-zero code.
 - Unicode: use `unicode-width` for widths; cursor math on `char`s, never bytes.
 - Colors: success green, error light-red, warning orange (see `config.rs`);
   always keep a text prefix (`Error:`, `Warning:`), color is not the only signal.

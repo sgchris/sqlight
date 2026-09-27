@@ -141,7 +141,9 @@ pub fn classify(sql: &str) -> StatementKind {
         .trim_start_matches('(')
         .to_ascii_uppercase();
     match first.as_str() {
-        "SELECT" | "WITH" | "VALUES" | "EXPLAIN" | "PRAGMA" | "TABLE" => StatementKind::Select,
+        "SELECT" | "WITH" | "VALUES" | "EXPLAIN" | "PRAGMA" | "TABLE" | "SHOW" => {
+            StatementKind::Select
+        }
         _ => StatementKind::Write,
     }
 }
@@ -249,6 +251,7 @@ mod tests {
             "VALUES (1),(2)",
             "explain select 1",
             "pragma table_info(users)",
+            "show search_path",
         ] {
             assert_eq!(classify(q), StatementKind::Select, "{q}");
         }

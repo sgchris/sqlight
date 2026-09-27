@@ -34,6 +34,11 @@ pub const OUTPUT_SCROLL_PAGE: usize = 10;
 /// SQLite busy timeout per statement, in milliseconds.
 pub const BUSY_TIMEOUT_MS: u64 = 5_000;
 
+/// Named-connections file, relative to the user's home directory.
+pub const CONNECTIONS_FILE_REL: &str = ".config/sqlight/connections.json";
+/// TCP connect timeout for network databases.
+pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Time window in which a second Ctrl+C confirms quit.
 pub const QUIT_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 /// Bottom-bar message shown after the first Ctrl+C in input mode.

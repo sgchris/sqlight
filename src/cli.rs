@@ -1,18 +1,22 @@
-//! CLI argument parsing: `sqlight <DB_PATH>`.
+//! CLI argument parsing: `sqlight <TARGET>`.
 
 use clap::Parser;
-use std::path::PathBuf;
 
-/// Convenient SQLite terminal client.
+/// Convenient SQLite / PostgreSQL terminal client.
 #[derive(Debug, Parser)]
-#[command(name = "sqlight", version, about = "Convenient SQLite terminal client")]
+#[command(
+    name = "sqlight",
+    version,
+    about = "Convenient SQLite / PostgreSQL terminal client"
+)]
 pub struct Cli {
-    /// Path to an existing SQLite database file.
-    pub db_path: PathBuf,
+    // Optional for clap so a missing target gets our own usage message.
+    /// SQLite file path or connection name from ~/.config/sqlight/connections.json.
+    pub target: Option<String>,
 }
 
 impl Cli {
-    /// Parse from process args. Exactly one positional is enforced by clap.
+    /// Parse from process args. At most one positional is enforced by clap.
     pub fn parse_args() -> Self {
         Self::parse()
     }
@@ -26,11 +30,17 @@ mod tests {
     #[test]
     fn parses_single_positional() {
         let cli = Cli::try_parse_from(["sqlight", "demo.db"]).expect("parse");
-        assert_eq!(cli.db_path, PathBuf::from("demo.db"));
+        assert_eq!(cli.target.as_deref(), Some("demo.db"));
     }
 
     #[test]
-    fn rejects_missing_arg() {
-        assert!(Cli::try_parse_from(["sqlight"]).is_err());
+    fn missing_arg_parses_as_none() {
+        let cli = Cli::try_parse_from(["sqlight"]).expect("parse");
+        assert!(cli.target.is_none());
+    }
+
+    #[test]
+    fn rejects_extra_args() {
+        assert!(Cli::try_parse_from(["sqlight", "a", "b"]).is_err());
     }
 }

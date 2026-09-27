@@ -8,7 +8,7 @@ use std::time::Instant;
 use crate::config::{
     OUTPUT_SCROLL_LINE, OUTPUT_SCROLL_PAGE, QUIT_CONFIRM_TIMEOUT, SCROLLBACK_LIMIT,
 };
-use crate::db::{self, SchemaCache};
+use crate::db::{Database, DbError, SchemaCache};
 use crate::editor::{Completer, History, InputBuffer};
 use crate::parser::{self, DotCommand, StatementKind};
 use crate::storage;
@@ -45,7 +45,7 @@ pub enum LineKind {
 /// Full application state. Rendered by `ui::render` (which clamps
 /// `scroll_offset` to the current viewport so overscroll can't accumulate).
 pub struct App {
-    pub db_path: PathBuf,
+    pub db: Database,
     pub mode: Mode,
     pub input: InputBuffer,
     pub history: History,
@@ -66,9 +66,9 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(db_path: PathBuf) -> Self {
+    pub fn new(db: Database) -> Self {
         Self {
-            db_path,
+            db,
             mode: Mode::Input,
             input: InputBuffer::new(),
             history: History::new(),
@@ -102,7 +102,7 @@ impl App {
 
     /// (Re)load table/column names for autocompletion.
     pub fn refresh_schema(&mut self) {
-        self.schema = db::refresh_schema_cache(&self.db_path);
+        self.schema = self.db.refresh_schema_cache();
         let s = self.schema.clone();
         self.completer.set_schema(s.tables, s.columns);
     }
@@ -390,7 +390,7 @@ impl App {
 
     fn execute_dot(&mut self, cmd: DotCommand) {
         match cmd {
-            DotCommand::Tables => match db::list_tables(&self.db_path) {
+            DotCommand::Tables => match self.db.list_tables() {
                 Ok(tables) => {
                     if tables.is_empty() {
                         self.push_line("Warning: no tables in database", LineKind::Warn);
@@ -400,19 +400,19 @@ impl App {
                         }
                     }
                 }
-                Err(e) => self.push_line(db::friendly_query_error(&e), LineKind::Err),
+                Err(e) => self.push_line(e.message(), LineKind::Err),
             },
-            DotCommand::Schema { table } => match db::get_schema(&self.db_path, &table) {
+            DotCommand::Schema { table } => match self.db.get_schema(&table) {
                 Ok(stmts) => {
                     for s in stmts {
                         let stmt = s.trim_end_matches(';').trim().to_string() + ";";
                         self.push_line(stmt, LineKind::Ok);
                     }
                 }
-                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                Err(DbError::NoSuchTable) => {
                     self.push_line(format!("Error: no such table: {table}"), LineKind::Err);
                 }
-                Err(e) => self.push_line(db::friendly_query_error(&e), LineKind::Err),
+                Err(e) => self.push_line(e.message(), LineKind::Err),
             },
             DotCommand::Clear => {
                 // `submit_input` already echoed `# .clear`; drop everything
@@ -424,7 +424,7 @@ impl App {
     }
 
     fn execute_select(&mut self, sql: &str) {
-        match db::query_select(&self.db_path, sql) {
+        match self.db.query_select(sql) {
             Ok(result) => {
                 if result.headers.is_empty() {
                     self.push_line("OK".to_string(), LineKind::Ok);
@@ -448,12 +448,12 @@ impl App {
                     );
                 }
             }
-            Err(e) => self.push_line(db::friendly_query_error(&e), LineKind::Err),
+            Err(e) => self.push_line(e.message(), LineKind::Err),
         }
     }
 
     fn execute_write(&mut self, sql: &str) {
-        match db::execute_write(&self.db_path, sql) {
+        match self.db.execute_write(sql) {
             Ok(n) => {
                 let first = sql
                     .split_whitespace()
@@ -468,7 +468,7 @@ impl App {
                     _ => self.push_line("OK".to_string(), LineKind::Ok),
                 }
             }
-            Err(e) => self.push_line(db::friendly_query_error(&e), LineKind::Err),
+            Err(e) => self.push_line(e.message(), LineKind::Err),
         }
     }
 }
@@ -530,7 +530,7 @@ mod tests {
 
     #[test]
     fn ctrl_c_twice_quits_from_input() {
-        let mut app = App::new(PathBuf::from("dummy.db"));
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
         app.handle_key(ctrl_c());
         assert!(!app.should_quit);
         assert!(app.is_quit_armed());
@@ -541,7 +541,7 @@ mod tests {
     #[test]
     fn ctrl_c_timeout_resets() {
         use std::time::Duration;
-        let mut app = App::new(PathBuf::from("dummy.db"));
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
         app.handle_key(ctrl_c());
         assert!(app.is_quit_armed());
         // Simulate the 3s window lapsing.
@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn ctrl_c_clears_nonempty_input_instead_of_quitting() {
-        let mut app = App::new(PathBuf::from("dummy.db"));
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
         type_text(&mut app, "select 1;");
         app.handle_key(ctrl_c());
         assert_eq!(app.input.full_text(), "", "input cleared");
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn ctrl_c_clears_all_lines_of_multiline_input() {
-        let mut app = App::new(PathBuf::from("dummy.db"));
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
         // Simulate an unterminated draft (e.g. unbalanced quote swallowing `;`).
         app.input
             .set_text("select * from users\nwhere name = 'oops");
@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     fn ctrl_c_on_blank_input_arms_quit() {
-        let mut app = App::new(PathBuf::from("dummy.db"));
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
         app.input.set_text("  \n ");
         assert!(app.input.is_blank());
         app.handle_key(ctrl_c());
@@ -603,7 +603,7 @@ mod tests {
 
     #[test]
     fn dot_clear_empties_scrollback_and_resets_scroll() {
-        let mut app = App::new(PathBuf::from("dummy.db"));
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
         app.push_line("# select 1;", LineKind::Echo);
         app.push_line("Error: boom", LineKind::Err);
         app.scroll_output_up(10);
@@ -622,7 +622,7 @@ mod tests {
     #[test]
     fn ctrl_c_from_table_goes_back_without_quitting() {
         use crate::db::QueryResult;
-        let mut app = App::new(PathBuf::from("dummy.db"));
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
         app.table = Some(TableView::new(QueryResult {
             headers: vec!["a".to_string()],
             rows: vec![vec!["1".to_string()]],
@@ -639,7 +639,7 @@ mod tests {
     #[test]
     fn table_ctrl_c_does_not_count_towards_quit() {
         use crate::db::QueryResult;
-        let mut app = App::new(PathBuf::from("dummy.db"));
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
         app.handle_key(ctrl_c());
         assert!(app.is_quit_armed());
         app.table = Some(TableView::new(QueryResult {
@@ -661,7 +661,7 @@ mod tests {
 
     #[test]
     fn enter_without_semi_continues_multiline() {
-        let mut app = App::new(PathBuf::from("dummy.db"));
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
         for c in "select 1".chars() {
             app.handle_key(key(KeyCode::Char(c)));
         }
@@ -673,7 +673,7 @@ mod tests {
 
     #[test]
     fn up_restores_history_with_caret_at_end() {
-        let mut app = App::new(PathBuf::from("dummy.db"));
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
         app.history.push("line1\nline2".to_string());
         app.handle_key(key(KeyCode::Up));
         assert_eq!(app.input.full_text(), "line1\nline2");
@@ -682,7 +682,7 @@ mod tests {
 
     #[test]
     fn scrollback_is_capped() {
-        let mut app = App::new(PathBuf::from("dummy.db"));
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
         for i in 0..SCROLLBACK_LIMIT + 50 {
             app.push_line(format!("line {i}"), LineKind::Echo);
         }
@@ -700,7 +700,7 @@ mod tests {
 
     #[test]
     fn shift_up_down_scrolls_output_without_touching_input() {
-        let mut app = App::new(PathBuf::from("dummy.db"));
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
         app.history.push("select 1;".to_string());
         app.handle_key(shift_key(KeyCode::Up));
         assert_eq!(app.scroll_offset, crate::config::OUTPUT_SCROLL_LINE);
@@ -713,7 +713,7 @@ mod tests {
 
     #[test]
     fn pgup_pgdn_scroll_output_page() {
-        let mut app = App::new(PathBuf::from("dummy.db"));
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
         app.handle_key(key(KeyCode::PageUp));
         assert_eq!(app.scroll_offset, crate::config::OUTPUT_SCROLL_PAGE);
         app.handle_key(key(KeyCode::PageDown));
@@ -722,7 +722,7 @@ mod tests {
 
     #[test]
     fn new_output_resets_manual_scroll_to_follow() {
-        let mut app = App::new(PathBuf::from("dummy.db"));
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
         app.scroll_output_up(25);
         assert_eq!(app.scroll_offset, 25);
         app.push_line("latest", LineKind::Ok);
@@ -757,7 +757,7 @@ mod tests {
     #[test]
     fn end_to_end_select_table_dot_write_error_history() {
         let path = seed_e2e_db();
-        let mut app = App::new(path.clone());
+        let mut app = App::new(Database::Sqlite(path.clone()));
         app.refresh_schema();
         assert!(app.schema.tables.contains(&"users".to_string()));
 
@@ -839,7 +839,7 @@ mod tests {
     #[test]
     fn multiline_statement_executes_on_terminating_semi() {
         let path = seed_e2e_db();
-        let mut app = App::new(path.clone());
+        let mut app = App::new(Database::Sqlite(path.clone()));
         app.refresh_schema();
         type_text(&mut app, "update users set name = 'greg2'");
         app.handle_key(key(KeyCode::Enter)); // no `;` -> newline, no execution
@@ -868,7 +868,7 @@ mod tests {
         let history_path = dir.join("history");
 
         // First session writes (multiline entry included).
-        let mut first = App::new(PathBuf::from("dummy.db"));
+        let mut first = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
         first.history_file = Some(history_path.clone());
         first.load_history();
         assert!(first.history.is_empty());
@@ -877,7 +877,7 @@ mod tests {
         assert!(history_path.is_file());
 
         // Second session loads what the first one stored.
-        let mut second = App::new(PathBuf::from("dummy.db"));
+        let mut second = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
         second.history_file = Some(history_path.clone());
         second.load_history();
         assert_eq!(
@@ -893,7 +893,7 @@ mod tests {
 
     #[test]
     fn history_stays_memory_only_without_file() {
-        let mut app = App::new(PathBuf::from("dummy.db"));
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
         assert!(app.history_file.is_none());
         app.push_history("select 1;".to_string());
         assert_eq!(app.history.entries(), &["select 1;".to_string()]);

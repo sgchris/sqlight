@@ -7,23 +7,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use super::{QueryResult, SchemaCache};
 use crate::config::{BUSY_TIMEOUT_MS, MAX_ROWS};
-
-/// Cached schema names used for autocompletion.
-#[derive(Debug, Clone, Default)]
-pub struct SchemaCache {
-    pub tables: Vec<String>,
-    pub columns: Vec<String>,
-}
-
-/// Grid result for SELECT-family statements.
-#[derive(Debug, Clone)]
-pub struct QueryResult {
-    pub headers: Vec<String>,
-    pub rows: Vec<Vec<String>>,
-    /// True when more rows existed than `MAX_ROWS` and output was cut.
-    pub truncated: bool,
-}
 
 fn open_conn(db_path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(db_path)?;

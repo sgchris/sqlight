@@ -3,6 +3,7 @@
 mod app;
 mod cli;
 mod config;
+mod connections;
 mod db;
 mod editor;
 mod parser;
@@ -16,6 +17,8 @@ use std::time::Duration;
 
 use app::App;
 use cli::Cli;
+use connections::Target;
+use db::Database;
 
 fn main() {
     if let Err(code) = run() {
@@ -26,11 +29,21 @@ fn main() {
 fn run() -> Result<(), i32> {
     let cli = Cli::parse_args();
 
-    // File IO problems exit *before* entering the TUI, with a message.
-    if let Err(msg) = db::preflight_db(&cli.db_path) {
+    let Some(target) = cli.target else {
+        let msg = connections::missing_target_message(&connections::connections_file_display());
         let _ = writeln!(std::io::stderr(), "{msg}");
-        return Err(1);
-    }
+        return Err(2);
+    };
+
+    // Resolution, file IO and connection problems exit *before* entering
+    // the TUI, with a message.
+    let database = match open_database(&target) {
+        Ok(d) => d,
+        Err(msg) => {
+            let _ = writeln!(std::io::stderr(), "{msg}");
+            return Err(1);
+        }
+    };
 
     // Terminal init. Any failure here is also a plain stderr exit.
     let mut terminal = match ratatui::try_init() {
@@ -41,7 +54,7 @@ fn run() -> Result<(), i32> {
         }
     };
 
-    let mut app = App::new(cli.db_path);
+    let mut app = App::new(database);
     app.history_file = storage::history_file_path();
     app.load_history();
     app.refresh_schema();
@@ -77,4 +90,27 @@ fn run() -> Result<(), i32> {
 
     ratatui::restore();
     Ok(())
+}
+
+/// Resolve `target` (SQLite file first, then named connection) and open it,
+/// prompting for a password when the connection entry has none.
+fn open_database(target: &str) -> Result<Database, String> {
+    match connections::resolve_target(target)? {
+        Target::Sqlite(path) => {
+            db::sqlite::preflight_db(&path)?;
+            Ok(Database::Sqlite(path))
+        }
+        Target::Postgres { name, cfg } => {
+            let password = match &cfg.password {
+                Some(p) => p.clone(),
+                None => rpassword::prompt_password(format!(
+                    "Password for {}@{} ({name}): ",
+                    cfg.user, cfg.host
+                ))
+                .map_err(|e| format!("Error: cannot read password: {e}"))?,
+            };
+            let pg = db::PgDb::connect(&name, &cfg, &password)?;
+            Ok(Database::Postgres(Box::new(pg)))
+        }
+    }
 }
