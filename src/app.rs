@@ -348,10 +348,18 @@ impl App {
             }
             KeyCode::Char('q' | 'Q') if key.modifiers.is_empty() => self.close_table(),
             KeyCode::Char('r' | 'R') if key.modifiers.is_empty() => self.refresh_table(),
-            KeyCode::Up => self.table.as_mut().map(|t| t.scroll_up(1)).unwrap_or(()),
-            KeyCode::Down => self.table.as_mut().map(|t| t.scroll_down(1)).unwrap_or(()),
-            KeyCode::Left => self.table.as_mut().map(|t| t.scroll_left(1)).unwrap_or(()),
-            KeyCode::Right => self.table.as_mut().map(|t| t.scroll_right(1)).unwrap_or(()),
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.table.as_mut().map(|t| t.scroll_up(1)).unwrap_or(())
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.table.as_mut().map(|t| t.scroll_down(1)).unwrap_or(())
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.table.as_mut().map(|t| t.scroll_left(1)).unwrap_or(())
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                self.table.as_mut().map(|t| t.scroll_right(1)).unwrap_or(())
+            }
             KeyCode::PageUp => self.table.as_mut().map(|t| t.scroll_up(10)).unwrap_or(()),
             KeyCode::PageDown => self.table.as_mut().map(|t| t.scroll_down(10)).unwrap_or(()),
             KeyCode::Home => {
@@ -948,6 +956,28 @@ mod tests {
         assert_eq!(app.input.full_text(), "select name from ");
         app.handle_key(mod_key(KeyCode::Char('u'), KeyModifiers::CONTROL));
         assert_eq!(app.input.full_text(), "");
+    }
+
+    #[test]
+    fn table_vim_keys_scroll() {
+        use crate::db::QueryResult;
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
+        app.table = Some(TableView::new(QueryResult {
+            headers: vec!["a".to_string(), "b".to_string()],
+            rows: vec![vec!["1".to_string(); 2], vec!["2".to_string(); 2]],
+            truncated: false,
+        }));
+        app.mode = Mode::Table;
+        let pos = |app: &App| {
+            let t = app.table.as_ref().expect("table");
+            (t.offset_y, t.offset_x)
+        };
+        app.handle_key(key(KeyCode::Char('j')));
+        app.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(pos(&app), (1, 1));
+        app.handle_key(key(KeyCode::Char('k')));
+        app.handle_key(key(KeyCode::Char('h')));
+        assert_eq!(pos(&app), (0, 0));
     }
 
     #[test]

@@ -78,7 +78,8 @@ Internal commands (no `;` needed):
 | `Left` / `Right`, `Backspace`, `Delete` | Edit |
 | `Esc` | Close autocomplete popup, or exit table view back to prompt |
 | `w` (in table) | Wrap/unwrap long values (wrap shows up to 8 lines) |
-| `Up`/`Down`/`Left`/`Right`, `PgUp`/`PgDn` (in table) | Scroll grid |
+| `r` (in table) | Refresh: re-run the query |
+| `Up`/`Down`/`Left`/`Right`, `h`/`j`/`k`/`l`, `PgUp`/`PgDn` (in table) | Scroll grid (`h` left, `j` down, `k` up, `l` right) |
 | `Ctrl+C` (in prompt, empty input) | Quit (press twice within 3s to confirm) |
 | `Ctrl+C` (in prompt, with input) | Clear input (all lines) |
 | `Ctrl+C` (in table) | Back to prompt |

@@ -342,7 +342,7 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
     render_bar_line(
         frame,
         foot[1],
-        "ESC back · r refresh · w wrap · ↑↓←→ scroll · PgUp/PgDn · Ctrl+C back",
+        "ESC back · r refresh · w wrap · ↑↓←→/hjkl scroll · PgUp/PgDn · Ctrl+C back",
         Style::default().fg(COLOR_HINT),
     );
     // No cursor in table mode (hidden by not setting a position).
