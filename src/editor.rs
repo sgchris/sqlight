@@ -1,6 +1,8 @@
 //! Multiline input buffer, command history, and TAB completion.
 //! All pure logic (no Ratatui IO) so it can be unit-tested.
 
+use std::collections::HashMap;
+
 use crate::config::{COMPLETE_MIN_CHARS, HISTORY_LIMIT};
 
 /// SQL keywords offered by autocompletion (uppercase by convention).
@@ -395,6 +397,28 @@ fn is_nav_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// Known tables mentioned anywhere in `query` (FROM, JOIN, UNION, ...),
+/// found by matching word tokens against `known` case-insensitively,
+/// in full (`public.users`) or by the part after the last dot. Tokens
+/// equal to `skip` (the word being completed) are ignored.
+pub fn tables_in_query(query: &str, known: &[String], skip: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let tokens = query
+        .split(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '.' | '"' | '`' | '[' | ']')))
+        .map(|t| t.replace(['"', '`', '[', ']'], ""))
+        .filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case(skip));
+    for tok in tokens {
+        let last = tok.rsplit('.').next().unwrap_or(&tok);
+        for t in known {
+            let hit = t.eq_ignore_ascii_case(&tok) || t.eq_ignore_ascii_case(last);
+            if hit && !out.contains(t) {
+                out.push(t.clone());
+            }
+        }
+    }
+    out
+}
+
 /// Up/Down command history. Multiline entries stored whole.
 #[derive(Debug, Clone, Default)]
 pub struct History {
@@ -481,6 +505,8 @@ impl History {
 pub struct Completer {
     tables: Vec<String>,
     columns: Vec<String>,
+    /// Lowercased table name -> its columns (scopes column candidates).
+    table_columns: HashMap<String, Vec<String>>,
     active_prefix: Option<String>,
     candidates: Vec<String>,
     index: usize,
@@ -491,9 +517,15 @@ impl Completer {
         Self::default()
     }
 
-    pub fn set_schema(&mut self, tables: Vec<String>, columns: Vec<String>) {
+    pub fn set_schema(
+        &mut self,
+        tables: Vec<String>,
+        columns: Vec<String>,
+        table_columns: HashMap<String, Vec<String>>,
+    ) {
         self.tables = tables;
         self.columns = columns;
+        self.table_columns = table_columns;
         self.dismiss();
     }
 
@@ -511,7 +543,10 @@ impl Completer {
     /// while the current word is the original prefix or one of the
     /// previously offered candidates (i.e. a word TAB itself inserted).
     /// Any other word starts a fresh session.
-    pub fn complete(&mut self, word: &str, shift: bool) -> Option<String> {
+    ///
+    /// `query` is the whole input buffer: column candidates are limited to
+    /// the tables it mentions (all columns when it mentions none).
+    pub fn complete(&mut self, word: &str, shift: bool, query: &str) -> Option<String> {
         if word.chars().count() < COMPLETE_MIN_CHARS {
             self.dismiss();
             return None;
@@ -525,7 +560,7 @@ impl Completer {
         };
         if !same_session {
             self.active_prefix = Some(word.to_string());
-            self.candidates = self.build_candidates(word);
+            self.candidates = self.build_candidates(word, query);
             self.index = 0;
             if self.candidates.is_empty() {
                 self.dismiss();
@@ -542,7 +577,18 @@ impl Completer {
         self.candidates.get(self.index).cloned()
     }
 
-    fn build_candidates(&self, prefix: &str) -> Vec<String> {
+    fn build_candidates(&self, prefix: &str, query: &str) -> Vec<String> {
+        let mentioned = tables_in_query(query, &self.tables, prefix);
+        let scoped: Vec<&String> = mentioned
+            .iter()
+            .filter_map(|t| self.table_columns.get(&t.to_lowercase()))
+            .flatten()
+            .collect();
+        let columns: Vec<&String> = if mentioned.is_empty() {
+            self.columns.iter().collect()
+        } else {
+            scoped
+        };
         // If prefix contains a dot, complete the part after the last dot.
         let sub = prefix.rsplit('.').next().unwrap_or(prefix);
         let mut out: Vec<String> = Vec::new();
@@ -561,7 +607,7 @@ impl Completer {
                 push_unique(t);
             }
         }
-        for c in &self.columns {
+        for c in columns {
             if c.len() >= COMPLETE_MIN_CHARS && c.to_lowercase().starts_with(&sub.to_lowercase()) {
                 push_unique(c);
             }
@@ -637,42 +683,50 @@ mod tests {
     #[test]
     fn completer_gate_and_cycle() {
         let mut c = Completer::new();
-        c.set_schema(vec!["employees".to_string()], vec!["age".to_string()]);
-        assert_eq!(c.complete("u", false), None);
+        c.set_schema(
+            vec!["employees".to_string()],
+            vec!["age".to_string()],
+            HashMap::new(),
+        );
+        assert_eq!(c.complete("u", false, ""), None);
         // "em" matches only the table (no keyword starts with EM).
-        assert_eq!(c.complete("em", false), Some("employees".to_string()));
+        assert_eq!(c.complete("em", false, ""), Some("employees".to_string()));
         // "se" matches SELECT + SET — repeated TAB cycles.
-        let a = c.complete("se", false).unwrap();
-        let b = c.complete("se", false).unwrap();
+        let a = c.complete("se", false, "").unwrap();
+        let b = c.complete("se", false, "").unwrap();
         assert_ne!(a, b);
         assert!(["SELECT", "SET"].contains(&a.as_str()));
         assert!(["SELECT", "SET"].contains(&b.as_str()));
         // Third TAB wraps around to the first candidate.
-        let d = c.complete("se", false).unwrap();
+        let d = c.complete("se", false, "").unwrap();
         assert_eq!(d, a);
     }
 
     #[test]
     fn completer_cycles_through_replaced_word() {
         let mut c = Completer::new();
-        c.set_schema(vec!["text_id".to_string(), "texts".to_string()], vec![]);
+        c.set_schema(
+            vec!["text_id".to_string(), "texts".to_string()],
+            vec![],
+            HashMap::new(),
+        );
         // First TAB completes "te" to the first match.
-        let first = c.complete("te", false).unwrap();
+        let first = c.complete("te", false, "").unwrap();
         assert_eq!(first, "text_id");
         // Second TAB sees the already-completed word and advances
         // to the next match instead of restarting the session.
-        let second = c.complete(&first, false).unwrap();
+        let second = c.complete(&first, false, "").unwrap();
         assert_eq!(second, "texts");
         // Third TAB wraps around.
-        let third = c.complete(&second, false).unwrap();
+        let third = c.complete(&second, false, "").unwrap();
         assert_eq!(third, "text_id");
         // Shift+TAB cycles backwards.
-        let back = c.complete(&third, true).unwrap();
+        let back = c.complete(&third, true, "").unwrap();
         assert_eq!(back, "texts");
         // An unrelated word restarts the session (no match -> None).
-        assert_eq!(c.complete("zz", false), None);
+        assert_eq!(c.complete("zz", false, ""), None);
         // Original prefix starts a fresh session again.
-        assert_eq!(c.complete("te", false), Some("text_id".to_string()));
+        assert_eq!(c.complete("te", false, ""), Some("text_id".to_string()));
     }
 
     #[test]
@@ -732,10 +786,67 @@ mod tests {
         assert_eq!(b.full_text(), "wö");
     }
 
+    fn scoped_completer() -> Completer {
+        let cols = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let mut map = HashMap::new();
+        map.insert("my_table".to_string(), cols(&["user_id", "user_content"]));
+        map.insert("credits".to_string(), cols(&["user_credits_available"]));
+        let mut c = Completer::new();
+        c.set_schema(
+            cols(&["my_table", "credits"]),
+            cols(&["user_id", "user_content", "user_credits_available"]),
+            map,
+        );
+        c
+    }
+
+    fn cycle(c: &mut Completer, word: &str, query: &str) -> Vec<String> {
+        let first = c.complete(word, false, query).unwrap();
+        let mut out = vec![first.clone()];
+        loop {
+            let next = c.complete(out.last().unwrap(), false, query).unwrap();
+            if next == first {
+                return out;
+            }
+            out.push(next);
+        }
+    }
+
+    #[test]
+    fn completion_scoped_to_query_tables() {
+        let mut c = scoped_completer();
+        let q = "select * from my_table where user_";
+        assert_eq!(cycle(&mut c, "user_", q), vec!["user_content", "user_id"]);
+    }
+
+    #[test]
+    fn completion_unions_all_mentioned_tables() {
+        let mut c = scoped_completer();
+        let q = "select * from my_table m join credits c on c.x = m.y where user_";
+        assert_eq!(cycle(&mut c, "user_", q).len(), 3);
+        c.dismiss();
+        let q = "select user_id from my_table union select 1 from \"CREDITS\" where user_";
+        assert_eq!(cycle(&mut c, "user_", q).len(), 3);
+    }
+
+    #[test]
+    fn completion_falls_back_to_all_columns() {
+        let mut c = scoped_completer();
+        assert_eq!(cycle(&mut c, "user_", "select user_").len(), 3);
+    }
+
+    #[test]
+    fn tables_in_query_quoted_and_qualified() {
+        let known = vec!["users".to_string(), "sales.orders".to_string()];
+        let found = tables_in_query("select * from main.\"Users\", sales.orders", &known, "");
+        assert_eq!(found, vec!["users".to_string(), "sales.orders".to_string()]);
+        assert!(tables_in_query("select * from users", &known, "users").is_empty());
+    }
+
     #[test]
     fn completer_suggests_clear_dot_command() {
         let mut c = Completer::new();
-        c.set_schema(vec![], vec![]);
-        assert_eq!(c.complete(".cl", false), Some(".clear".to_string()));
+        c.set_schema(vec![], vec![], HashMap::new());
+        assert_eq!(c.complete(".cl", false, ""), Some(".clear".to_string()));
     }
 }

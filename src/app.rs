@@ -107,7 +107,8 @@ impl App {
     pub fn refresh_schema(&mut self) {
         self.schema = self.db.refresh_schema_cache();
         let s = self.schema.clone();
-        self.completer.set_schema(s.tables, s.columns);
+        self.completer
+            .set_schema(s.tables, s.columns, s.table_columns);
     }
 
     // -- scrollback ---------------------------------------------------------
@@ -402,7 +403,8 @@ impl App {
 
     fn tab_complete(&mut self, shift: bool) {
         let (word, _) = self.input.word_before_cursor();
-        if let Some(done) = self.completer.complete(&word, shift) {
+        let query = self.input.full_text();
+        if let Some(done) = self.completer.complete(&word, shift, &query) {
             self.input.replace_word_before_cursor(&done);
         }
     }

@@ -3,6 +3,7 @@
 pub mod postgres;
 pub mod sqlite;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub use self::postgres::PgDb;
@@ -12,6 +13,8 @@ pub use self::postgres::PgDb;
 pub struct SchemaCache {
     pub tables: Vec<String>,
     pub columns: Vec<String>,
+    /// Lowercased table name -> its column names.
+    pub table_columns: HashMap<String, Vec<String>>,
 }
 
 /// Grid result for SELECT-family statements.

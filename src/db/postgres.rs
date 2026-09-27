@@ -3,6 +3,8 @@
 //! network round-trip plus re-authentication each time.
 
 use ::postgres::config::SslMode;
+use std::collections::HashMap;
+
 use ::postgres::{Client, Config, SimpleQueryMessage};
 use postgres_native_tls::MakeTlsConnector;
 
@@ -167,15 +169,31 @@ impl PgDb {
     pub fn refresh_schema_cache(&mut self) -> SchemaCache {
         let tables = self.list_tables().unwrap_or_default();
         let sql = format!(
-            "SELECT DISTINCT column_name::text FROM information_schema.columns \
-             WHERE table_schema {USER_SCHEMAS_FILTER} ORDER BY 1"
+            "SELECT CASE WHEN table_schema = 'public' THEN table_name::text \
+             ELSE table_schema || '.' || table_name END, column_name::text \
+             FROM information_schema.columns \
+             WHERE table_schema {USER_SCHEMAS_FILTER} ORDER BY 1, ordinal_position"
         );
-        let columns = self
-            .client
-            .query(&sql, &[])
-            .map(|rows| rows.iter().map(|r| r.get::<_, String>(0)).collect())
-            .unwrap_or_default();
-        SchemaCache { tables, columns }
+        let rows = self.client.query(&sql, &[]).unwrap_or_default();
+        let mut columns: Vec<String> = Vec::new();
+        let mut table_columns: HashMap<String, Vec<String>> = HashMap::new();
+        for r in &rows {
+            let table: String = r.get(0);
+            let col: String = r.get(1);
+            if !columns.contains(&col) {
+                columns.push(col.clone());
+            }
+            table_columns
+                .entry(table.to_lowercase())
+                .or_default()
+                .push(col);
+        }
+        columns.sort();
+        SchemaCache {
+            tables,
+            columns,
+            table_columns,
+        }
     }
 
     /// Fetch at most `MAX_ROWS` (+1 probe) through a server-side cursor so

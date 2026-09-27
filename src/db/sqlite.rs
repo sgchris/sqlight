@@ -121,11 +121,13 @@ pub fn refresh_schema_cache(db_path: &Path) -> SchemaCache {
         let Ok(mapped) = stmt.query_map([], |r| r.get::<_, String>(1)) else {
             continue;
         };
-        for c in mapped.flatten() {
-            if !cols.iter().any(|x| x.eq_ignore_ascii_case(&c)) {
-                cols.push(c);
+        let own: Vec<String> = mapped.flatten().collect();
+        for c in &own {
+            if !cols.iter().any(|x| x.eq_ignore_ascii_case(c)) {
+                cols.push(c.clone());
             }
         }
+        cache.table_columns.insert(t.to_lowercase(), own);
     }
     cache.tables = tables;
     cache.columns = cols;
