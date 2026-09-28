@@ -6,6 +6,7 @@ mod config;
 mod connections;
 mod db;
 mod editor;
+mod json_view;
 mod parser;
 mod storage;
 mod table_view;

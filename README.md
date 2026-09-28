@@ -89,7 +89,9 @@ Internal commands (no `;` needed):
 | `Esc` | Close autocomplete popup, or exit table view back to prompt |
 | `w` (in table) | Wrap/unwrap long values (wrap shows up to 8 lines) |
 | `W` (in table) | Full wrap: show whole values with no line cap (`W` again to turn off) |
-| `r` (in table) | Refresh: re-run the query |
+| `J` (in table) | Show the results as pretty JSON (an array with one object per row) |
+| `T` (in table) | Show the results as a table (the default view) |
+| `r` (in table) | Refresh: re-run the query (keeps the current view) |
 | `Up`/`Down`/`Left`/`Right`, `h`/`j`/`k`/`l`, `PgUp`/`PgDn` (in table) | Scroll grid (`h` left, `j` down, `k` up, `l` right) |
 | `Ctrl+C` (in prompt, empty input) | Quit (press twice within 3s to confirm) |
 | `Ctrl+C` (in prompt, with input) | Clear input (all lines) |
@@ -97,7 +99,12 @@ Internal commands (no `;` needed):
 | `Ctrl+D` | Quit anywhere |
 
 `SELECT` results open a full-screen scrollable grid. Long values are truncated
-with `...`; press `w` to wrap them (up to 8 lines), or `W` to wrap them in full. Writes print green `Affected N rows` / `OK`;
+with `...`; press `w` to wrap them (up to 8 lines), or `W` to wrap them in full.
+Press `J` for a JSON view: keys follow column order, `NULL` is `null`, numbers
+stay numbers, and values that hold a JSON object or array are shown as nested
+pretty JSON. PostgreSQL returns every value as text, so there numbers and
+`t`/`f` booleans are inferred. Scroll with `Up`/`Down`/`j`/`k`, `PgUp`/`PgDn`,
+`Home`/`End`; `T` goes back to the grid. Writes print green `Affected N rows` / `OK`;
 errors are light-red, warnings (e.g. truncation, empty DB) orange.
 
 Command history (`Up`/`Down`, up to 200 entries) persists between sessions in

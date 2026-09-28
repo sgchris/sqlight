@@ -7,7 +7,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::{QueryResult, SchemaCache};
+use super::{CellKind, QueryResult, SchemaCache};
 use crate::config::{BUSY_TIMEOUT_MS, MAX_ROWS};
 
 fn open_conn(db_path: &Path) -> rusqlite::Result<Connection> {
@@ -163,6 +163,7 @@ fn query_select_limited(
         .collect();
     let col_count = headers.len();
     let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut kinds: Vec<Vec<CellKind>> = Vec::new();
     let mut query_rows = stmt.query([])?;
     let mut truncated = false;
     while let Some(row) = query_rows.next()? {
@@ -171,16 +172,31 @@ fn query_select_limited(
             break;
         }
         let mut out = Vec::with_capacity(col_count);
+        let mut out_kinds = Vec::with_capacity(col_count);
         for i in 0..col_count {
-            out.push(value_to_string(row.get_ref(i)?));
+            let v = row.get_ref(i)?;
+            out_kinds.push(value_kind(v));
+            out.push(value_to_string(v));
         }
         rows.push(out);
+        kinds.push(out_kinds);
     }
     Ok(QueryResult {
         headers,
         rows,
         truncated,
+        kinds,
     })
+}
+
+fn value_kind(v: ValueRef<'_>) -> CellKind {
+    match v {
+        ValueRef::Null => CellKind::Null,
+        ValueRef::Integer(_) => CellKind::Integer,
+        ValueRef::Real(_) => CellKind::Real,
+        ValueRef::Text(_) => CellKind::Text,
+        ValueRef::Blob(_) => CellKind::Blob,
+    }
 }
 
 fn value_to_string(v: ValueRef<'_>) -> String {

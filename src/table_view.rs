@@ -5,6 +5,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::config::{MAX_COL_WIDTH, MAX_WRAP_LINES, MIN_COL_WIDTH, TRUNC_SUFFIX};
 use crate::db::QueryResult;
+use crate::json_view;
 
 /// How long cell values are displayed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -28,6 +29,23 @@ impl WrapMode {
     }
 }
 
+/// How a result is shown: the grid (default) or pretty JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewMode {
+    #[default]
+    Table,
+    Json,
+}
+
+impl ViewMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            ViewMode::Table => "table",
+            ViewMode::Json => "json",
+        }
+    }
+}
+
 /// Full-screen grid state for one SELECT result.
 #[derive(Debug, Clone)]
 pub struct TableView {
@@ -42,11 +60,18 @@ pub struct TableView {
     pub offset_y: usize,
     /// First visible column.
     pub offset_x: usize,
+    pub view: ViewMode,
+    /// Pretty JSON of the whole result, one entry per logical line.
+    pub json_lines: Vec<String>,
+    /// First visible JSON line; clamped against the wrapped height at
+    /// render time, like the scrollback.
+    pub json_offset: usize,
 }
 
 impl TableView {
     pub fn new(result: QueryResult) -> Self {
         let natural_widths = natural_widths(&result.headers, &result.rows);
+        let json_lines = json_view::pretty_rows(&result.headers, &result.rows, &result.kinds);
         Self {
             headers: result.headers,
             rows: result.rows,
@@ -55,7 +80,31 @@ impl TableView {
             wrap: WrapMode::Off,
             offset_y: 0,
             offset_x: 0,
+            view: ViewMode::Table,
+            json_lines,
+            json_offset: 0,
         }
+    }
+
+    pub fn show_json(&mut self) {
+        self.view = ViewMode::Json;
+    }
+
+    pub fn show_table(&mut self) {
+        self.view = ViewMode::Table;
+    }
+
+    pub fn is_json(&self) -> bool {
+        self.view == ViewMode::Json
+    }
+
+    pub fn json_scroll_up(&mut self, n: usize) {
+        self.json_offset = self.json_offset.saturating_sub(n);
+    }
+
+    /// Unclamped here; the renderer caps it at the last screenful.
+    pub fn json_scroll_down(&mut self, n: usize) {
+        self.json_offset = self.json_offset.saturating_add(n);
     }
 
     pub fn row_count(&self) -> usize {
@@ -337,6 +386,7 @@ mod tests {
             headers: vec!["a".to_string()],
             rows: vec![vec![value.to_string()]],
             truncated: false,
+            kinds: Vec::new(),
         })
     }
 
@@ -376,6 +426,7 @@ mod tests {
             headers: vec!["a".to_string(), "b".to_string()],
             rows: vec![vec!["1".to_string(), "2".to_string()]],
             truncated: false,
+            kinds: Vec::new(),
         });
         let mut v = v;
         v.scroll_down(99);

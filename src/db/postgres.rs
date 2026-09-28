@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use ::postgres::{Client, Config, SimpleQueryMessage};
 use postgres_native_tls::MakeTlsConnector;
 
-use super::{DbError, QueryResult, SchemaCache};
+use super::{CellKind, DbError, QueryResult, SchemaCache};
 use crate::config::{CONNECT_TIMEOUT, MAX_ROWS};
 use crate::connections::PgConfig;
 
@@ -291,6 +291,7 @@ fn tx_state_after(sql: &str) -> Option<bool> {
 fn collect_result(msgs: Vec<SimpleQueryMessage>, max_rows: usize) -> QueryResult {
     let mut headers: Vec<String> = Vec::new();
     let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut kinds: Vec<Vec<CellKind>> = Vec::new();
     let mut truncated = false;
     for m in msgs {
         match m {
@@ -310,6 +311,14 @@ fn collect_result(msgs: Vec<SimpleQueryMessage>, max_rows: usize) -> QueryResult
                         .map(|i| row.get(i).unwrap_or("NULL").to_string())
                         .collect(),
                 );
+                kinds.push(
+                    (0..row.len())
+                        .map(|i| match row.get(i) {
+                            None => CellKind::Null,
+                            Some(_) => CellKind::Untyped,
+                        })
+                        .collect(),
+                );
             }
             SimpleQueryMessage::CommandComplete(_) if !headers.is_empty() => break,
             _ => {}
@@ -319,6 +328,7 @@ fn collect_result(msgs: Vec<SimpleQueryMessage>, max_rows: usize) -> QueryResult
         headers,
         rows,
         truncated,
+        kinds,
     }
 }
 

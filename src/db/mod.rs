@@ -24,6 +24,21 @@ pub struct QueryResult {
     pub rows: Vec<Vec<String>>,
     /// True when more rows existed than `MAX_ROWS` and output was cut.
     pub truncated: bool,
+    /// Value type per cell, parallel to `rows`. Missing entries are
+    /// treated as `CellKind::Untyped`.
+    pub kinds: Vec<Vec<CellKind>>,
+}
+
+/// Source type of one result cell (drives JSON rendering).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellKind {
+    Null,
+    Integer,
+    Real,
+    Text,
+    Blob,
+    /// Text of unknown type (PostgreSQL simple protocol); inferred on use.
+    Untyped,
 }
 
 /// Backend-neutral failure. `Other` holds a ready `Error: ...` line.

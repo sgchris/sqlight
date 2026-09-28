@@ -23,7 +23,10 @@ OpenCode, etc.) and human contributors. Keep it harness-agnostic.
   `Completer` (TAB cycling, ≥2 char gate).
 - `src/app.rs` — `Mode::{Input, Table}`, scrollback, key dispatch, execution glue.
 - `src/ui.rs` — Ratatui rendering + color helpers (`line_ok/line_err/line_warn`).
-- `src/table_view.rs` — grid state, truncation (`...`), wrap (max 8 lines), scrolling.
+- `src/table_view.rs` — grid state, truncation (`...`), wrap (max 8 lines), scrolling,
+ table/JSON view mode (`J`/`T`).
+- `src/json_view.rs` — pretty JSON of a result (array of row objects, typed via
+ `CellKind`, embedded JSON nested). Pure functions, unit-test them.
 - `.temp/` — local scratch (demo DBs, scripts). NEVER commit; it is git-ignored.
 
 ## Commands

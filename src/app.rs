@@ -376,6 +376,22 @@ impl App {
     }
 
     fn handle_table_key(&mut self, key: KeyEvent) {
+        let shift_or_none = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+        if let Some(t) = self.table.as_mut() {
+            match key.code {
+                KeyCode::Char('J') if shift_or_none => return t.show_json(),
+                KeyCode::Char('T') if shift_or_none => return t.show_table(),
+                _ if t.is_json()
+                    && !matches!(
+                        key.code,
+                        KeyCode::Esc | KeyCode::Char('q' | 'Q' | 'r' | 'R')
+                    ) =>
+                {
+                    return Self::handle_json_key(t, key);
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Esc => self.close_table(),
             KeyCode::Char('w') if key.modifiers.is_empty() => {
@@ -421,6 +437,19 @@ impl App {
         }
     }
 
+    /// JSON view keys: line scrolling only (Esc/q/r are handled as in the grid).
+    fn handle_json_key(t: &mut TableView, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => t.json_scroll_up(1),
+            KeyCode::Down | KeyCode::Char('j') => t.json_scroll_down(1),
+            KeyCode::PageUp => t.json_scroll_up(10),
+            KeyCode::PageDown => t.json_scroll_down(10),
+            KeyCode::Home => t.json_offset = 0,
+            KeyCode::End => t.json_offset = usize::MAX,
+            _ => {}
+        }
+    }
+
     fn close_table(&mut self) {
         self.mode = Mode::Input;
         self.table = None;
@@ -439,6 +468,8 @@ impl App {
                 let mut view = TableView::new(result);
                 if let Some(old) = &self.table {
                     view.wrap = old.wrap;
+                    view.view = old.view;
+                    view.json_offset = old.json_offset;
                     view.offset_y = old.offset_y.min(view.row_count().saturating_sub(1));
                     view.offset_x = old.offset_x.min(view.headers.len().saturating_sub(1));
                 }
@@ -772,6 +803,7 @@ mod tests {
             headers: vec!["a".to_string()],
             rows: vec![vec!["1".to_string()]],
             truncated: false,
+            kinds: Vec::new(),
         }));
         app.mode = Mode::Table;
         app.handle_key(ctrl_c());
@@ -791,6 +823,7 @@ mod tests {
             headers: vec!["a".to_string()],
             rows: vec![vec!["1".to_string()]],
             truncated: false,
+            kinds: Vec::new(),
         }));
         app.mode = Mode::Table;
         app.handle_key(ctrl_c());
@@ -909,6 +942,7 @@ mod tests {
             headers: vec!["a".to_string()],
             rows: vec![vec!["1".to_string()]],
             truncated: false,
+            kinds: Vec::new(),
         }));
         app.mode = Mode::Table;
         let wrap = |app: &App| app.table.as_ref().expect("table").wrap;
@@ -1092,6 +1126,7 @@ mod tests {
             headers: vec!["a".to_string(), "b".to_string()],
             rows: vec![vec!["1".to_string(); 2], vec!["2".to_string(); 2]],
             truncated: false,
+            kinds: Vec::new(),
         }));
         app.mode = Mode::Table;
         let pos = |app: &App| {
@@ -1119,6 +1154,38 @@ mod tests {
         app.handle_key(key(KeyCode::Char('r')));
         assert_eq!(app.mode, Mode::Table);
         assert_eq!(app.table.as_ref().expect("table").row_count(), 3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn shift_j_and_t_switch_views_and_refresh_keeps_json() {
+        use crate::table_view::ViewMode;
+        let path = seed_e2e_db();
+        let mut app = App::new(Database::Sqlite(path.clone()));
+        type_text(&mut app, "select * from users;");
+        app.handle_key(key(KeyCode::Enter));
+        let view = |app: &App| app.table.as_ref().expect("table").view;
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(view(&app), ViewMode::Table, "lowercase j only scrolls");
+        assert_eq!(app.table.as_ref().expect("table").offset_y, 1);
+        app.handle_key(shift_key(KeyCode::Char('J')));
+        assert_eq!(view(&app), ViewMode::Json);
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(app.table.as_ref().expect("table").json_offset, 1);
+        app.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(view(&app), ViewMode::Json, "refresh keeps the JSON view");
+        assert!(
+            app.table
+                .as_ref()
+                .expect("table")
+                .json_lines
+                .iter()
+                .any(|l| l.contains("\"name\": \"greg\""))
+        );
+        app.handle_key(shift_key(KeyCode::Char('T')));
+        assert_eq!(view(&app), ViewMode::Table);
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.mode, Mode::Input);
         let _ = std::fs::remove_file(&path);
     }
 

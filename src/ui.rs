@@ -17,6 +17,7 @@ use crate::config::{
     COLOR_ERROR, COLOR_HINT, COLOR_OK, COLOR_PROMPT, COLOR_WARN, COMPLETE_POPUP_MAX_ROWS,
     CONT_INDENT, INPUT_HINT, MAX_ROWS, PROMPT, QUIT_CONFIRM_MESSAGE,
 };
+use crate::table_view::{TableView, wrap_text};
 
 /// Max visual rows the input box may occupy (rest goes to scrollback).
 const MAX_INPUT_HEIGHT: u16 = 12;
@@ -32,6 +33,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
     match app.mode {
         Mode::Input => render_input(frame, app, area),
+        Mode::Table if app.table.as_ref().is_some_and(TableView::is_json) => {
+            render_json(frame, app, area)
+        }
         Mode::Table => render_table(frame, app, area),
     }
 }
@@ -384,29 +388,77 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
         String::new()
     };
     let status = format!(
-        "row {}/{} · col {}/{}{} · wrap: {}",
+        "row {}/{} · col {}/{}{} · wrap: {} · view: {}",
         table.offset_y + 1,
         table.row_count().max(1),
         table.offset_x + 1,
         table.col_count().max(1),
         trunc_note,
         wrap_state,
+        table.view.label(),
     );
-    // Two-line footer: dynamic status first (never clipped away), key help second.
-    let foot = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[1]);
+    render_table_footer(frame, chunks[1], &status);
+    // No cursor in table mode (hidden by not setting a position).
+}
+
+/// JSON view: the result's pretty JSON, wrapped to the inner width and
+/// scrolled by visual line. Clamps `json_offset` back into the view.
+fn render_json(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(table) = app.table.as_mut() else {
+        return;
+    };
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(area);
+    let inner_w = chunks[0].width.saturating_sub(2) as usize;
+    let inner_h = chunks[0].height.saturating_sub(2) as usize;
+    let lines: Vec<String> = table
+        .json_lines
+        .iter()
+        .flat_map(|l| wrap_text(l, inner_w, usize::MAX))
+        .collect();
+    let max_offset = lines.len().saturating_sub(inner_h);
+    table.json_offset = table.json_offset.min(max_offset);
+    let visible: Vec<Line> = lines
+        .iter()
+        .skip(table.json_offset)
+        .take(inner_h)
+        .map(|l| Line::from(l.clone()))
+        .collect();
+    let title = format!(" {} rows · JSON ", table.row_count());
+    let para = Paragraph::new(Text::from(visible)).block(Block::bordered().title(title));
+    frame.render_widget(para, chunks[0]);
+
+    let trunc_note = if table.truncated {
+        format!(" · truncated to first {MAX_ROWS}")
+    } else {
+        String::new()
+    };
+    let status = format!(
+        "line {}/{} · {} rows{} · view: {}",
+        table.json_offset + 1,
+        lines.len().max(1),
+        table.row_count(),
+        trunc_note,
+        table.view.label(),
+    );
+    render_table_footer(frame, chunks[1], &status);
+}
+
+/// Two-line footer shared by the grid and JSON views: dynamic status
+/// first (never clipped away), key help second.
+fn render_table_footer(frame: &mut Frame, area: Rect, status: &str) {
+    let foot = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
     render_bar_line(
         frame,
         foot[0],
-        &crate::table_view::truncate_text(&status, foot[0].width as usize),
+        &crate::table_view::truncate_text(status, foot[0].width as usize),
         Style::default().bold(),
     );
     render_bar_line(
         frame,
         foot[1],
-        "ESC back · r refresh · w wrap · W full wrap · ↑↓←→/hjkl · PgUp/Dn · Ctrl+C back",
+        "ESC/Ctrl+C back · r refresh · w/W wrap · J json · T table · ↑↓←→/hjkl · PgUp/Dn",
         Style::default().fg(COLOR_HINT),
     );
-    // No cursor in table mode (hidden by not setting a position).
 }
 
 /// Column indices currently in view (all from offset_x; viewport clips right).
@@ -534,6 +586,7 @@ mod tests {
                 vec!["2".to_string(), "a-much-longer-value-here".to_string()],
             ],
             truncated: true,
+            kinds: Vec::new(),
         });
         view.toggle_wrap();
         app.table = Some(view);
@@ -543,9 +596,46 @@ mod tests {
         assert!(text.contains("greg"), "row visible");
         assert!(text.contains("wrap: on"), "wrap state shown");
         assert!(text.contains("truncated"), "truncation note shown");
-        assert!(text.contains("ESC back"), "help shown");
-        assert!(text.contains("W full wrap"), "legend lists W");
-        assert!(text.contains("Ctrl+C back"), "table Ctrl+C goes back");
+        assert!(
+            text.contains("ESC/Ctrl+C back"),
+            "help shown, Ctrl+C goes back"
+        );
+        assert!(text.contains("w/W wrap"), "legend lists w and W");
+        assert!(text.contains("J json · T table"), "legend lists J and T");
+        assert!(text.contains("view: table"), "view state shown");
+    }
+
+    #[test]
+    fn renders_json_view_pretty_with_nested_json() {
+        use crate::db::{CellKind, QueryResult};
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).expect("terminal");
+        let mut app = App::new(crate::db::Database::Sqlite(PathBuf::from("demo.db")));
+        let mut view = TableView::new(QueryResult {
+            headers: vec!["id".to_string(), "meta".to_string()],
+            rows: vec![vec!["1".to_string(), r#"{"tag":"x"}"#.to_string()]],
+            truncated: false,
+            kinds: vec![vec![CellKind::Integer, CellKind::Text]],
+        });
+        view.show_json();
+        view.json_offset = 999;
+        app.table = Some(view);
+        app.mode = Mode::Table;
+        term.draw(|f| render(f, &mut app)).expect("draw json");
+        let text = screen_text(&term);
+        assert!(text.contains("\"id\": 1,"), "got: {text}");
+        assert!(
+            text.contains("\"tag\": \"x\""),
+            "nested JSON pretty-printed"
+        );
+        assert!(text.contains("view: json"));
+        assert!(text.contains("J json · T table"), "legend lists J and T");
+        assert_eq!(
+            app.table.as_ref().expect("table").json_offset,
+            0,
+            "overscroll clamped"
+        );
     }
 
     #[test]
@@ -565,6 +655,7 @@ mod tests {
             headers: vec!["body".to_string()],
             rows: vec![vec![long]],
             truncated: false,
+            kinds: Vec::new(),
         });
         view.toggle_full_wrap();
         app.table = Some(view);
@@ -573,7 +664,8 @@ mod tests {
         let text = screen_text(&term);
         assert!(text.contains("wrap: full"), "full wrap state shown");
         assert!(text.contains("seg11"), "tail of value visible, got: {text}");
-        assert!(!text.contains("..."), "no truncation marker");
+        let grid: String = text.chars().take(40 * 58).collect();
+        assert!(!grid.contains("..."), "no truncation marker in the grid");
     }
 
     #[test]
@@ -588,6 +680,7 @@ mod tests {
             headers: vec!["body".to_string()],
             rows: vec![vec![format!("head{}", "q".repeat(2000))]],
             truncated: false,
+            kinds: Vec::new(),
         });
         view.toggle_full_wrap();
         app.table = Some(view);
@@ -609,6 +702,7 @@ mod tests {
             headers: vec!["id".to_string(), "body".to_string()],
             rows: vec![vec!["1".to_string(), long.clone()]],
             truncated: false,
+            kinds: Vec::new(),
         }));
         app.mode = Mode::Table;
         term.draw(|f| render(f, &mut app)).expect("draw table");
@@ -632,6 +726,7 @@ mod tests {
             headers: vec!["c1".to_string(), "c2".to_string()],
             rows: vec![vec!["X".repeat(20), "Y".repeat(20)]],
             truncated: false,
+            kinds: Vec::new(),
         });
         assert!(!view.is_wrapped(), "non-wrap mode");
         app.table = Some(view);
