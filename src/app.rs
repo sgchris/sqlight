@@ -842,6 +842,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn completion_popup_closes_when_leaving_tab_loop() {
+        for exit in [
+            KeyCode::Char('x'),
+            KeyCode::Backspace,
+            KeyCode::Esc,
+            KeyCode::PageUp,
+        ] {
+            let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
+            type_text(&mut app, "se");
+            app.handle_key(key(KeyCode::Tab));
+            assert!(app.completer.popup().is_some(), "popup open after TAB");
+            app.handle_key(key(exit));
+            assert!(app.completer.popup().is_none(), "popup closed by {exit:?}");
+        }
+    }
+
+    #[test]
+    fn table_shift_w_toggles_full_wrap() {
+        use crate::db::QueryResult;
+        use crate::table_view::WrapMode;
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
+        app.table = Some(TableView::new(QueryResult {
+            headers: vec!["a".to_string()],
+            rows: vec![vec!["1".to_string()]],
+            truncated: false,
+        }));
+        app.mode = Mode::Table;
+        let wrap = |app: &App| app.table.as_ref().expect("table").wrap;
+        let mut shift_w = key(KeyCode::Char('W'));
+        shift_w.modifiers = KeyModifiers::SHIFT;
+        app.handle_key(shift_w);
+        assert_eq!(wrap(&app), WrapMode::Full);
+        app.handle_key(key(KeyCode::Char('w')));
+        assert_eq!(wrap(&app), WrapMode::Off);
+        app.handle_key(key(KeyCode::Char('w')));
+        assert_eq!(wrap(&app), WrapMode::Capped);
+    }
+
     fn seed_e2e_db() -> PathBuf {
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);

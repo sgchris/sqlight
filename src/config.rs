@@ -46,6 +46,8 @@ pub const QUIT_CONFIRM_MESSAGE: &str = "Press Ctrl+C again to quit";
 
 /// Minimum prefix length that triggers autocompletion.
 pub const COMPLETE_MIN_CHARS: usize = 2;
+/// Maximum visible items in the TAB completion popup (it scrolls beyond).
+pub const COMPLETE_POPUP_MAX_ROWS: usize = 8;
 
 /// Status/error color palette (Ratatui colors).
 pub const COLOR_OK: ratatui::style::Color = ratatui::style::Color::Green;

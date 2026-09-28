@@ -535,11 +535,20 @@ impl Completer {
         self.index = 0;
     }
 
+    /// Items of the active session (typed word first) and the selected
+    /// index, or `None` when no TAB session is running.
+    pub fn popup(&self) -> Option<(&[String], usize)> {
+        self.active_prefix
+            .as_ref()
+            .map(|_| (self.candidates.as_slice(), self.index))
+    }
+
     /// Advance one completion step. Returns the replacement word, if any.
     /// `shift` cycles backwards (Shift+Tab).
     ///
-    /// TAB cycles through all matches for the originally typed prefix:
-    /// `te` -> `text_id` -> `texts` -> `text_id` ... The session continues
+    /// TAB cycles through all matches for the originally typed prefix,
+    /// and back to the prefix itself:
+    /// `te` -> `text_id` -> `texts` -> `te` -> `text_id` ... The session continues
     /// while the current word is the original prefix or one of the
     /// previously offered candidates (i.e. a word TAB itself inserted).
     /// Any other word starts a fresh session.
@@ -559,13 +568,18 @@ impl Completer {
             }
         };
         if !same_session {
-            self.active_prefix = Some(word.to_string());
-            self.candidates = self.build_candidates(word, query);
-            self.index = 0;
-            if self.candidates.is_empty() {
+            let matches: Vec<String> = self
+                .build_candidates(word, query)
+                .into_iter()
+                .filter(|m| m != word)
+                .collect();
+            if matches.is_empty() {
                 self.dismiss();
                 return None;
             }
+            self.active_prefix = Some(word.to_string());
+            self.candidates = std::iter::once(word.to_string()).chain(matches).collect();
+            self.index = if shift { self.candidates.len() - 1 } else { 1 };
         } else if shift {
             self.index = self
                 .index
@@ -697,9 +711,30 @@ mod tests {
         assert_ne!(a, b);
         assert!(["SELECT", "SET"].contains(&a.as_str()));
         assert!(["SELECT", "SET"].contains(&b.as_str()));
-        // Third TAB wraps around to the first candidate.
-        let d = c.complete("se", false, "").unwrap();
-        assert_eq!(d, a);
+        // Third TAB returns to the typed word, fourth wraps to the first match.
+        assert_eq!(c.complete(&b, false, ""), Some("se".to_string()));
+        assert_eq!(c.complete("se", false, ""), Some(a));
+    }
+
+    #[test]
+    fn completer_popup_lists_prefix_first() {
+        let mut c = Completer::new();
+        c.set_schema(
+            vec!["table_a".to_string(), "tariffs".to_string()],
+            vec![],
+            HashMap::new(),
+        );
+        assert!(c.popup().is_none());
+        let first = c.complete("ta", false, "").unwrap();
+        let (items, sel) = c.popup().unwrap();
+        assert_eq!(items, ["ta", "TABLE", "table_a", "tariffs"]);
+        assert_eq!(sel, 1);
+        assert_eq!(first, "TABLE");
+        // Shift+TAB from the first match goes back to the typed word.
+        assert_eq!(c.complete(&first, true, ""), Some("ta".to_string()));
+        assert_eq!(c.popup().unwrap().1, 0);
+        c.dismiss();
+        assert!(c.popup().is_none());
     }
 
     #[test]
@@ -717,12 +752,13 @@ mod tests {
         // to the next match instead of restarting the session.
         let second = c.complete(&first, false, "").unwrap();
         assert_eq!(second, "texts");
-        // Third TAB wraps around.
-        let third = c.complete(&second, false, "").unwrap();
-        assert_eq!(third, "text_id");
+        // Third TAB restores the typed word, fourth wraps around.
+        assert_eq!(c.complete(&second, false, ""), Some("te".to_string()));
+        let fourth = c.complete("te", false, "").unwrap();
+        assert_eq!(fourth, "text_id");
         // Shift+TAB cycles backwards.
-        let back = c.complete(&third, true, "").unwrap();
-        assert_eq!(back, "texts");
+        let back = c.complete(&fourth, true, "").unwrap();
+        assert_eq!(back, "te");
         // An unrelated word restarts the session (no match -> None).
         assert_eq!(c.complete("zz", false, ""), None);
         // Original prefix starts a fresh session again.
@@ -802,10 +838,10 @@ mod tests {
 
     fn cycle(c: &mut Completer, word: &str, query: &str) -> Vec<String> {
         let first = c.complete(word, false, query).unwrap();
-        let mut out = vec![first.clone()];
+        let mut out = vec![first];
         loop {
             let next = c.complete(out.last().unwrap(), false, query).unwrap();
-            if next == first {
+            if next == word {
                 return out;
             }
             out.push(next);

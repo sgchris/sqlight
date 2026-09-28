@@ -82,7 +82,7 @@ Internal commands (no `;` needed):
 | Key | Action |
 |---|---|
 | `Enter` | Run (if `;`-terminated or dot-command) else newline |
-| `Tab` / `Shift+Tab` | Autocomplete next/previous (needs ≥2 chars) |
+| `Tab` / `Shift+Tab` | Autocomplete next/previous (needs ≥2 chars); a popup above the prompt lists the typed word plus all matches |
 | `Up` / `Down` | History (whole multiline entry, caret to end) or move within buffer |
 | `Shift+Up` / `Shift+Down`, `PgUp` / `PgDn` (in prompt) | Scroll output (latest shown by default) |
 | `Left` / `Right`, `Backspace`, `Delete` | Edit |

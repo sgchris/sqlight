@@ -8,14 +8,14 @@ use ratatui::{
     layout::{Constraint, Layout, Position, Rect},
     style::Style,
     text::{Line, Span, Text},
-    widgets::{Block, Paragraph, Wrap},
+    widgets::{Block, Clear, Paragraph, Wrap},
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, LineKind, Mode};
 use crate::config::{
-    COLOR_ERROR, COLOR_HINT, COLOR_OK, COLOR_PROMPT, COLOR_WARN, CONT_INDENT, INPUT_HINT, MAX_ROWS,
-    PROMPT, QUIT_CONFIRM_MESSAGE,
+    COLOR_ERROR, COLOR_HINT, COLOR_OK, COLOR_PROMPT, COLOR_WARN, COMPLETE_POPUP_MAX_ROWS,
+    CONT_INDENT, INPUT_HINT, MAX_ROWS, PROMPT, QUIT_CONFIRM_MESSAGE,
 };
 
 /// Max visual rows the input box may occupy (rest goes to scrollback).
@@ -48,6 +48,7 @@ fn render_input(frame: &mut Frame, app: &mut App, area: Rect) {
     .split(area);
 
     render_scrollback(frame, app, chunks[0]);
+    render_completion_popup(frame, app, chunks[0]);
     render_prompt(frame, app, chunks[1]);
     if app.is_quit_armed() {
         render_bar_line(
@@ -108,6 +109,62 @@ fn render_scrollback(frame: &mut Frame, app: &mut App, area: Rect) {
         .wrap(Wrap { trim: false })
         .scroll((first_visible.min(u16::MAX as usize) as u16, 0));
     frame.render_widget(para, area);
+}
+
+/// TAB completion popup, drawn over the bottom of the scrollback `area`
+/// (right above the prompt) and aligned with the word being completed.
+fn render_completion_popup(frame: &mut Frame, app: &App, area: Rect) {
+    let Some((items, selected)) = app.completer.popup() else {
+        return;
+    };
+    if items.is_empty() || area.height < 3 || area.width < 4 {
+        return;
+    }
+    let visible_rows = items
+        .len()
+        .min(COMPLETE_POPUP_MAX_ROWS)
+        .min(area.height as usize - 2);
+    let inner_w = items.iter().map(|s| display_w(s)).max().unwrap_or(1);
+    let width = (inner_w + 2).min(area.width as usize) as u16;
+    let height = (visible_rows + 2) as u16;
+
+    let (_, word_start) = app.input.word_before_cursor();
+    let prefix = if app.input.row == 0 {
+        PROMPT
+    } else {
+        CONT_INDENT
+    };
+    let before: String = app.input.lines()[app.input.row]
+        .chars()
+        .take(word_start)
+        .collect();
+    let col = (display_w(prefix) + display_w(&before)) % area.width.max(1) as usize;
+    let x = (col as u16).min(area.width - width);
+    let rect = Rect::new(area.x + x, area.y + area.height - height, width, height);
+
+    // Scroll the window so the selection stays visible.
+    let first = selected.saturating_sub(visible_rows - 1);
+    let lines: Vec<Line> = items
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(visible_rows)
+        .map(|(i, item)| {
+            let style = if i == selected {
+                Style::default().fg(COLOR_PROMPT).reversed().bold()
+            } else if i == 0 {
+                Style::default().fg(COLOR_HINT).italic()
+            } else {
+                Style::default()
+            };
+            Line::from(Span::styled(pad_to(inner_w, item), style))
+        })
+        .collect();
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).block(Block::bordered()),
+        rect,
+    );
 }
 
 /// Wrapped visual rows the scrollback occupies at `width`.
@@ -671,6 +728,52 @@ mod tests {
             "viewport moved down off the top, got: {text}"
         );
         assert!(text.contains("line 08"), "next row in view, got: {text}");
+    }
+
+    #[test]
+    fn completion_popup_shows_and_hides_preserving_scrollback() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let backend = TestBackend::new(80, 12);
+        let mut term = Terminal::new(backend).expect("terminal");
+        let mut app = App::new(crate::db::Database::Sqlite(PathBuf::from("demo.db")));
+        for i in 0..10 {
+            app.push_line(
+                format!("output line {i:02} with some padding text"),
+                LineKind::Echo,
+            );
+        }
+        let press = |app: &mut App, code| app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+        term.draw(|f| render(f, &mut app)).expect("draw before");
+        let before = screen_text(&term);
+
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('e'));
+        press(&mut app, KeyCode::Tab);
+        term.draw(|f| render(f, &mut app)).expect("draw popup");
+        let text = screen_text(&term);
+        assert!(text.contains("SELECT"), "popup lists SELECT, got: {text}");
+        assert!(text.contains("SET"), "popup lists SET");
+        assert!(text.contains("│se"), "typed word listed first, got: {text}");
+        assert!(
+            text.contains("output line 04"),
+            "scrollback above popup visible"
+        );
+        assert!(
+            text.contains("with some padding text"),
+            "text beside popup kept"
+        );
+
+        press(&mut app, KeyCode::Char(' '));
+        term.draw(|f| render(f, &mut app)).expect("draw after");
+        let after = screen_text(&term);
+        assert!(!after.contains("│se"), "popup hidden, got: {after}");
+        let scroll_rows = |s: &str| s[..80 * 10].to_string();
+        assert_eq!(
+            scroll_rows(&after),
+            scroll_rows(&before),
+            "scrollback restored"
+        );
     }
 
     #[test]
