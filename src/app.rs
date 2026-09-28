@@ -12,7 +12,7 @@ use crate::db::{Database, DbError, SchemaCache};
 use crate::editor::{Completer, History, InputBuffer};
 use crate::parser::{self, DotCommand, StatementKind};
 use crate::storage;
-use crate::table_view::TableView;
+use crate::table_view::{self, TableView};
 
 /// Which screen the user is looking at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -463,9 +463,13 @@ impl App {
         let Some(sql) = self.table_sql.clone() else {
             return;
         };
-        match self.db.query_select(&sql) {
+        let started = Instant::now();
+        let outcome = self.db.query_select(&sql);
+        let elapsed_ms = table_view::ceil_millis(started.elapsed());
+        match outcome {
             Ok(result) => {
                 let mut view = TableView::new(result);
+                view.elapsed_ms = elapsed_ms;
                 if let Some(old) = &self.table {
                     view.wrap = old.wrap;
                     view.view = old.view;
@@ -589,7 +593,10 @@ impl App {
     }
 
     fn execute_select(&mut self, sql: &str) {
-        match self.db.query_select(sql) {
+        let started = Instant::now();
+        let outcome = self.db.query_select(sql);
+        let elapsed_ms = table_view::ceil_millis(started.elapsed());
+        match outcome {
             Ok(result) => {
                 if result.headers.is_empty() {
                     self.push_line("OK".to_string(), LineKind::Ok);
@@ -600,7 +607,9 @@ impl App {
                     return;
                 }
                 let truncated = result.truncated;
-                self.table = Some(TableView::new(result));
+                let mut view = TableView::new(result);
+                view.elapsed_ms = elapsed_ms;
+                self.table = Some(view);
                 self.table_sql = Some(sql.to_string());
                 self.mode = Mode::Table;
                 if truncated {

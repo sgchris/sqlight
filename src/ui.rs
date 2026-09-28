@@ -388,11 +388,12 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
         String::new()
     };
     let status = format!(
-        "row {}/{} · col {}/{}{} · wrap: {} · view: {}",
+        "row {}/{} · col {}/{} · {} ms{} · wrap: {} · view: {}",
         table.offset_y + 1,
         table.row_count().max(1),
         table.offset_x + 1,
         table.col_count().max(1),
+        table.elapsed_ms,
         trunc_note,
         wrap_state,
         table.view.label(),
@@ -433,10 +434,11 @@ fn render_json(frame: &mut Frame, app: &mut App, area: Rect) {
         String::new()
     };
     let status = format!(
-        "line {}/{} · {} rows{} · view: {}",
+        "line {}/{} · {} rows · {} ms{} · view: {}",
         table.json_offset + 1,
         lines.len().max(1),
         table.row_count(),
+        table.elapsed_ms,
         trunc_note,
         table.view.label(),
     );
@@ -589,12 +591,14 @@ mod tests {
             kinds: Vec::new(),
         });
         view.toggle_wrap();
+        view.elapsed_ms = 42;
         app.table = Some(view);
         app.mode = Mode::Table;
         term.draw(|f| render(f, &mut app)).expect("draw table");
         let text = screen_text(&term);
         assert!(text.contains("greg"), "row visible");
         assert!(text.contains("wrap: on"), "wrap state shown");
+        assert!(text.contains("· 42 ms"), "query time shown");
         assert!(text.contains("truncated"), "truncation note shown");
         assert!(
             text.contains("ESC/Ctrl+C back"),

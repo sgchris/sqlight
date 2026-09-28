@@ -1,6 +1,8 @@
 //! Results-grid state: column widths, truncation (`...`), wrapping
 //! (max 8 lines), and scroll offsets. Rendering lives in `ui.rs`.
 
+use std::time::Duration;
+
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::{MAX_COL_WIDTH, MAX_WRAP_LINES, MIN_COL_WIDTH, TRUNC_SUFFIX};
@@ -66,6 +68,13 @@ pub struct TableView {
     /// First visible JSON line; clamped against the wrapped height at
     /// render time, like the scrollback.
     pub json_offset: usize,
+    /// Wall-clock time the query took, in whole milliseconds (rounded up).
+    pub elapsed_ms: u128,
+}
+
+/// Whole milliseconds, rounded up (a 0.2 ms query shows as 1 ms).
+pub fn ceil_millis(d: Duration) -> u128 {
+    d.as_nanos().div_ceil(1_000_000)
 }
 
 impl TableView {
@@ -83,6 +92,7 @@ impl TableView {
             view: ViewMode::Table,
             json_lines,
             json_offset: 0,
+            elapsed_ms: 0,
         }
     }
 
@@ -379,6 +389,15 @@ mod tests {
     fn wrap_newlines_force_breaks() {
         let lines = wrap_text("ab\ncdefgh", 4, 8);
         assert_eq!(lines[0], "ab");
+    }
+
+    #[test]
+    fn ceil_millis_rounds_up() {
+        assert_eq!(ceil_millis(Duration::ZERO), 0);
+        assert_eq!(ceil_millis(Duration::from_micros(1)), 1);
+        assert_eq!(ceil_millis(Duration::from_micros(1000)), 1);
+        assert_eq!(ceil_millis(Duration::from_micros(1001)), 2);
+        assert_eq!(ceil_millis(Duration::from_millis(250)), 250);
     }
 
     fn one_cell_view(value: &str) -> TableView {
