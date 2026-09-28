@@ -244,11 +244,15 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
     let body_h = inner_h.saturating_sub(2); // minus header+sep
     let mut used = 0usize;
     for r in table.offset_y..table.row_count() {
-        let h = table.row_height(r, &widths).max(1);
+        let mut h = table.row_height(r, &widths).max(1);
         if used + h > body_h.max(1) {
-            break;
+            // A row taller than the whole body still shows its top part.
+            if used > 0 {
+                break;
+            }
+            h = body_h.max(1);
         }
-        if table.wrapped {
+        if table.is_wrapped() {
             // Multi-line row: stack wrapped cell lines side by side.
             let cells: Vec<Vec<String>> = visible
                 .iter()
@@ -316,7 +320,7 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
     let para = Paragraph::new(Text::from(clipped)).block(Block::bordered().title(title));
     frame.render_widget(para, chunks[0]);
 
-    let wrap_state = if table.wrapped { "on" } else { "off" };
+    let wrap_state = table.wrap.label();
     let trunc_note = if table.truncated {
         format!(" · truncated to first {MAX_ROWS}")
     } else {
@@ -342,7 +346,7 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
     render_bar_line(
         frame,
         foot[1],
-        "ESC back · r refresh · w wrap · ↑↓←→/hjkl scroll · PgUp/PgDn · Ctrl+C back",
+        "ESC back · r refresh · w wrap · W full wrap · ↑↓←→/hjkl · PgUp/Dn · Ctrl+C back",
         Style::default().fg(COLOR_HINT),
     );
     // No cursor in table mode (hidden by not setting a position).
@@ -483,7 +487,56 @@ mod tests {
         assert!(text.contains("wrap: on"), "wrap state shown");
         assert!(text.contains("truncated"), "truncation note shown");
         assert!(text.contains("ESC back"), "help shown");
+        assert!(text.contains("W full wrap"), "legend lists W");
         assert!(text.contains("Ctrl+C back"), "table Ctrl+C goes back");
+    }
+
+    #[test]
+    fn renders_table_full_wrap_whole_value() {
+        use crate::db::QueryResult;
+        use crate::table_view::TableView;
+
+        // 12 forced lines: more than the capped wrap allows.
+        let long = (0..12)
+            .map(|i| format!("seg{i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let backend = TestBackend::new(40, 60);
+        let mut term = Terminal::new(backend).expect("terminal");
+        let mut app = App::new(crate::db::Database::Sqlite(PathBuf::from("demo.db")));
+        let mut view = TableView::new(QueryResult {
+            headers: vec!["body".to_string()],
+            rows: vec![vec![long]],
+            truncated: false,
+        });
+        view.toggle_full_wrap();
+        app.table = Some(view);
+        app.mode = Mode::Table;
+        term.draw(|f| render(f, &mut app)).expect("draw table");
+        let text = screen_text(&term);
+        assert!(text.contains("wrap: full"), "full wrap state shown");
+        assert!(text.contains("seg11"), "tail of value visible, got: {text}");
+        assert!(!text.contains("..."), "no truncation marker");
+    }
+
+    #[test]
+    fn full_wrap_row_taller_than_screen_still_renders() {
+        use crate::db::QueryResult;
+        use crate::table_view::TableView;
+
+        let backend = TestBackend::new(40, 10);
+        let mut term = Terminal::new(backend).expect("terminal");
+        let mut app = App::new(crate::db::Database::Sqlite(PathBuf::from("demo.db")));
+        let mut view = TableView::new(QueryResult {
+            headers: vec!["body".to_string()],
+            rows: vec![vec![format!("head{}", "q".repeat(2000))]],
+            truncated: false,
+        });
+        view.toggle_full_wrap();
+        app.table = Some(view);
+        app.mode = Mode::Table;
+        term.draw(|f| render(f, &mut app)).expect("draw table");
+        assert!(screen_text(&term).contains("head"), "top of tall row shown");
     }
 
     #[test]
@@ -523,7 +576,7 @@ mod tests {
             rows: vec![vec!["X".repeat(20), "Y".repeat(20)]],
             truncated: false,
         });
-        assert!(!view.wrapped, "non-wrap mode");
+        assert!(!view.is_wrapped(), "non-wrap mode");
         app.table = Some(view);
         app.mode = Mode::Table;
         term.draw(|f| render(f, &mut app)).expect("draw table");

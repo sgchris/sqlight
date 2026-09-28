@@ -6,6 +6,28 @@ use unicode_width::UnicodeWidthStr;
 use crate::config::{MAX_COL_WIDTH, MAX_WRAP_LINES, MIN_COL_WIDTH, TRUNC_SUFFIX};
 use crate::db::QueryResult;
 
+/// How long cell values are displayed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WrapMode {
+    /// One truncated line per cell.
+    #[default]
+    Off,
+    /// Wrapped, at most `MAX_WRAP_LINES` lines per cell.
+    Capped,
+    /// Wrapped with no line cap.
+    Full,
+}
+
+impl WrapMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            WrapMode::Off => "off",
+            WrapMode::Capped => "on",
+            WrapMode::Full => "full",
+        }
+    }
+}
+
 /// Full-screen grid state for one SELECT result.
 #[derive(Debug, Clone)]
 pub struct TableView {
@@ -15,7 +37,7 @@ pub struct TableView {
     /// Width each column needs to show every value untruncated
     /// (screen fitting happens per frame via `fit_widths`).
     pub natural_widths: Vec<usize>,
-    pub wrapped: bool,
+    pub wrap: WrapMode,
     /// First visible data row.
     pub offset_y: usize,
     /// First visible column.
@@ -30,7 +52,7 @@ impl TableView {
             rows: result.rows,
             truncated: result.truncated,
             natural_widths,
-            wrapped: false,
+            wrap: WrapMode::Off,
             offset_y: 0,
             offset_x: 0,
         }
@@ -44,8 +66,24 @@ impl TableView {
         self.headers.len()
     }
 
+    /// `w`: Off <-> Capped; Full goes back to Off.
     pub fn toggle_wrap(&mut self) {
-        self.wrapped = !self.wrapped;
+        self.wrap = match self.wrap {
+            WrapMode::Off => WrapMode::Capped,
+            WrapMode::Capped | WrapMode::Full => WrapMode::Off,
+        };
+    }
+
+    /// `W`: Off/Capped -> Full; Full goes back to Off.
+    pub fn toggle_full_wrap(&mut self) {
+        self.wrap = match self.wrap {
+            WrapMode::Full => WrapMode::Off,
+            WrapMode::Off | WrapMode::Capped => WrapMode::Full,
+        };
+    }
+
+    pub fn is_wrapped(&self) -> bool {
+        self.wrap != WrapMode::Off
     }
 
     pub fn scroll_up(&mut self, n: usize) {
@@ -77,16 +115,16 @@ impl TableView {
             .and_then(|r| r.get(col))
             .map(String::as_str)
             .unwrap_or("");
-        if self.wrapped {
-            wrap_text(raw, width, MAX_WRAP_LINES)
-        } else {
-            vec![truncate_text(raw, width)]
+        match self.wrap {
+            WrapMode::Off => vec![truncate_text(raw, width)],
+            WrapMode::Capped => wrap_text(raw, width, MAX_WRAP_LINES),
+            WrapMode::Full => wrap_text(raw, width, usize::MAX),
         }
     }
 
     /// Height (in terminal rows) of a data row under the current mode.
     pub fn row_height(&self, row: usize, widths: &[usize]) -> usize {
-        if !self.wrapped {
+        if !self.is_wrapped() {
             return 1;
         }
         (0..self.col_count())
@@ -292,6 +330,44 @@ mod tests {
     fn wrap_newlines_force_breaks() {
         let lines = wrap_text("ab\ncdefgh", 4, 8);
         assert_eq!(lines[0], "ab");
+    }
+
+    fn one_cell_view(value: &str) -> TableView {
+        TableView::new(QueryResult {
+            headers: vec!["a".to_string()],
+            rows: vec![vec![value.to_string()]],
+            truncated: false,
+        })
+    }
+
+    #[test]
+    fn full_wrap_has_no_line_cap() {
+        let mut v = one_cell_view(&"x".repeat(4 * (MAX_WRAP_LINES + 3)));
+        v.toggle_wrap();
+        let capped = v.cell_lines(0, 0, 4);
+        assert_eq!(capped.len(), MAX_WRAP_LINES);
+        assert!(capped.last().unwrap().ends_with(TRUNC_SUFFIX));
+        v.toggle_full_wrap();
+        let full = v.cell_lines(0, 0, 4);
+        assert_eq!(full.len(), MAX_WRAP_LINES + 3);
+        assert!(full.iter().all(|l| !l.contains(TRUNC_SUFFIX)));
+        assert_eq!(v.row_height(0, &[4]), MAX_WRAP_LINES + 3);
+    }
+
+    #[test]
+    fn wrap_mode_transitions() {
+        let mut v = one_cell_view("1");
+        assert_eq!(v.wrap, WrapMode::Off);
+        v.toggle_wrap();
+        assert_eq!(v.wrap, WrapMode::Capped);
+        v.toggle_full_wrap();
+        assert_eq!(v.wrap, WrapMode::Full);
+        v.toggle_wrap();
+        assert_eq!(v.wrap, WrapMode::Off);
+        v.toggle_full_wrap();
+        assert_eq!(v.wrap, WrapMode::Full);
+        v.toggle_full_wrap();
+        assert_eq!(v.wrap, WrapMode::Off);
     }
 
     #[test]

@@ -325,8 +325,14 @@ impl App {
                 self.completer.dismiss();
                 self.input.move_line_end();
             }
-            KeyCode::PageUp => self.scroll_output_up(OUTPUT_SCROLL_PAGE),
-            KeyCode::PageDown => self.scroll_output_down(OUTPUT_SCROLL_PAGE),
+            KeyCode::PageUp => {
+                self.completer.dismiss();
+                self.scroll_output_up(OUTPUT_SCROLL_PAGE);
+            }
+            KeyCode::PageDown => {
+                self.completer.dismiss();
+                self.scroll_output_down(OUTPUT_SCROLL_PAGE);
+            }
             KeyCode::Char(ch) => {
                 self.completer.dismiss();
                 // Plain typing (modifiers other than Shift are shortcuts).
@@ -341,9 +347,16 @@ impl App {
     fn handle_table_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => self.close_table(),
-            KeyCode::Char('w' | 'W') if key.modifiers.is_empty() => {
+            KeyCode::Char('w') if key.modifiers.is_empty() => {
                 if let Some(t) = self.table.as_mut() {
                     t.toggle_wrap();
+                }
+            }
+            KeyCode::Char('W')
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                if let Some(t) = self.table.as_mut() {
+                    t.toggle_full_wrap();
                 }
             }
             KeyCode::Char('q' | 'Q') if key.modifiers.is_empty() => self.close_table(),
@@ -394,9 +407,7 @@ impl App {
             Ok(result) => {
                 let mut view = TableView::new(result);
                 if let Some(old) = &self.table {
-                    if old.wrapped != view.wrapped {
-                        view.toggle_wrap();
-                    }
+                    view.wrap = old.wrap;
                     view.offset_y = old.offset_y.min(view.row_count().saturating_sub(1));
                     view.offset_x = old.offset_x.min(view.headers.len().saturating_sub(1));
                 }

@@ -88,6 +88,7 @@ Internal commands (no `;` needed):
 | `Left` / `Right`, `Backspace`, `Delete` | Edit |
 | `Esc` | Close autocomplete popup, or exit table view back to prompt |
 | `w` (in table) | Wrap/unwrap long values (wrap shows up to 8 lines) |
+| `W` (in table) | Full wrap: show whole values with no line cap (`W` again to turn off) |
 | `r` (in table) | Refresh: re-run the query |
 | `Up`/`Down`/`Left`/`Right`, `h`/`j`/`k`/`l`, `PgUp`/`PgDn` (in table) | Scroll grid (`h` left, `j` down, `k` up, `l` right) |
 | `Ctrl+C` (in prompt, empty input) | Quit (press twice within 3s to confirm) |
@@ -96,7 +97,7 @@ Internal commands (no `;` needed):
 | `Ctrl+D` | Quit anywhere |
 
 `SELECT` results open a full-screen scrollable grid. Long values are truncated
-with `...`; press `w` to wrap them. Writes print green `Affected N rows` / `OK`;
+with `...`; press `w` to wrap them (up to 8 lines), or `W` to wrap them in full. Writes print green `Affected N rows` / `OK`;
 errors are light-red, warnings (e.g. truncation, empty DB) orange.
 
 Command history (`Up`/`Down`, up to 200 entries) persists between sessions in
