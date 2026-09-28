@@ -11,7 +11,11 @@ mod storage;
 mod table_view;
 mod ui;
 
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{
+    self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
+use crossterm::{execute, terminal};
 use std::io::Write;
 use std::time::Duration;
 
@@ -54,6 +58,15 @@ fn run() -> Result<(), i32> {
         }
     };
 
+    // Kitty keyboard protocol, where supported, reports Cmd (Super) and
+    // tells Ctrl+Shift+Z apart from Ctrl+Z.
+    let key_enhanced = matches!(terminal::supports_keyboard_enhancement(), Ok(true))
+        && execute!(
+            std::io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )
+        .is_ok();
+
     let mut app = App::new(database);
     app.history_file = storage::history_file_path();
     app.load_history();
@@ -88,6 +101,9 @@ fn run() -> Result<(), i32> {
         }
     }
 
+    if key_enhanced {
+        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+    }
     ratatui::restore();
     Ok(())
 }

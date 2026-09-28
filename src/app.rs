@@ -169,7 +169,38 @@ impl App {
     // -- key dispatch --------------------------------------------------------
 
     /// Handle one key event. Returns nothing; check `should_quit` after.
+    /// Every input-buffer change made by the key becomes an undo step.
     pub fn handle_key(&mut self, key: KeyEvent) {
+        if self.mode == Mode::Input && self.handle_undo_key(key) {
+            return;
+        }
+        let before = self.input.snapshot();
+        self.dispatch_key(key);
+        self.input.record_edit(before, typed_char(key));
+    }
+
+    /// Cmd/Ctrl+Z undoes; Cmd/Ctrl+Shift+Z and Ctrl+Y redo (legacy
+    /// terminals send Ctrl+Shift+Z as plain Ctrl+Z). Returns true when consumed.
+    fn handle_undo_key(&mut self, key: KeyEvent) -> bool {
+        let m = key.modifiers;
+        let cmd = m.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER);
+        match key.code {
+            KeyCode::Char('z') if cmd && !m.contains(KeyModifiers::SHIFT) => {
+                self.input.undo();
+            }
+            KeyCode::Char('z' | 'Z') if cmd => {
+                self.input.redo();
+            }
+            KeyCode::Char('y' | 'Y') if m.contains(KeyModifiers::CONTROL) => {
+                self.input.redo();
+            }
+            _ => return false,
+        }
+        self.completer.dismiss();
+        true
+    }
+
+    fn dispatch_key(&mut self, key: KeyEvent) {
         if is_ctrl_c(key) {
             match self.mode {
                 Mode::Table => {
@@ -574,6 +605,16 @@ impl App {
             }
             Err(e) => self.push_line(e.message(), LineKind::Err),
         }
+    }
+}
+
+/// The char a key inserts as plain typing (no modifiers besides Shift).
+fn typed_char(key: KeyEvent) -> Option<char> {
+    match key.code {
+        KeyCode::Char(ch) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+            Some(ch)
+        }
+        _ => None,
     }
 }
 
@@ -1006,6 +1047,41 @@ mod tests {
         assert_eq!(app.input.full_text(), "select name from ");
         app.handle_key(mod_key(KeyCode::Char('u'), KeyModifiers::CONTROL));
         assert_eq!(app.input.full_text(), "");
+    }
+
+    #[test]
+    fn undo_redo_keys_restore_killed_line() {
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
+        type_text(&mut app, "select name");
+        app.handle_key(mod_key(KeyCode::Backspace, KeyModifiers::SUPER));
+        assert_eq!(app.input.full_text(), "");
+        app.handle_key(mod_key(KeyCode::Char('z'), KeyModifiers::SUPER));
+        assert_eq!(app.input.full_text(), "select name");
+        app.handle_key(mod_key(
+            KeyCode::Char('z'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(app.input.full_text(), "");
+        app.handle_key(mod_key(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        assert_eq!(app.input.full_text(), "select name");
+        app.handle_key(mod_key(
+            KeyCode::Char('Z'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(app.input.full_text(), "");
+        app.handle_key(mod_key(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        app.handle_key(mod_key(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert_eq!(app.input.full_text(), "");
+    }
+
+    #[test]
+    fn undo_brings_back_draft_cleared_by_ctrl_c() {
+        let mut app = App::new(Database::Sqlite(PathBuf::from("dummy.db")));
+        type_text(&mut app, "select 1");
+        app.handle_key(ctrl_c());
+        assert!(app.input.is_blank());
+        app.handle_key(mod_key(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        assert_eq!(app.input.full_text(), "select 1");
     }
 
     #[test]

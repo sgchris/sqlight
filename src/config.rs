@@ -19,6 +19,8 @@ pub const MAX_WRAP_LINES: usize = 8;
 /// Suffix appended to truncated values.
 pub const TRUNC_SUFFIX: &str = "...";
 
+/// Maximum undo steps kept for the input buffer (Cmd/Ctrl+Z).
+pub const UNDO_LIMIT: usize = 200;
 /// Maximum commands remembered for Up/Down history.
 pub const HISTORY_LIMIT: usize = 200;
 /// Subdirectory name inside the per-user data dir (see `storage`).

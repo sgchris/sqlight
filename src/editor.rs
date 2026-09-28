@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use crate::config::{COMPLETE_MIN_CHARS, HISTORY_LIMIT};
+use crate::config::{COMPLETE_MIN_CHARS, HISTORY_LIMIT, UNDO_LIMIT};
 
 /// SQL keywords offered by autocompletion (uppercase by convention).
 pub const SQL_KEYWORDS: &[&str] = &[
@@ -77,6 +77,14 @@ pub const SQL_KEYWORDS: &[&str] = &[
     "MAX",
 ];
 
+/// Buffer contents plus caret, as stored on the undo/redo stacks.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Snapshot {
+    lines: Vec<String>,
+    row: usize,
+    col: usize,
+}
+
 /// Multiline text with a `char`-based cursor (never byte indices).
 #[derive(Debug, Clone, Default)]
 pub struct InputBuffer {
@@ -85,15 +93,76 @@ pub struct InputBuffer {
     pub row: usize,
     /// Cursor col (char index within the line).
     pub col: usize,
+    undo_stack: Vec<Snapshot>,
+    redo_stack: Vec<Snapshot>,
+    /// Whether the top undo step is an open run of typed chars that the
+    /// next typed char may extend.
+    typing_run: bool,
 }
 
 impl InputBuffer {
     pub fn new() -> Self {
         Self {
             lines: vec![String::new()],
-            row: 0,
-            col: 0,
+            ..Self::default()
         }
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            lines: self.lines.clone(),
+            row: self.row,
+            col: self.col,
+        }
+    }
+
+    fn restore(&mut self, snap: Snapshot) {
+        self.lines = snap.lines;
+        self.row = snap.row;
+        self.col = snap.col;
+    }
+
+    /// Register the edit that turned `before` into the current contents.
+    /// `typed` is the char for plain typing: consecutive typed chars form
+    /// one undo step, and whitespace starts a new one (word-sized steps).
+    /// Caret-only changes record nothing but close the typing run.
+    pub fn record_edit(&mut self, before: Snapshot, typed: Option<char>) {
+        if before.lines == self.lines {
+            self.typing_run = false;
+            return;
+        }
+        let extends_run = self.typing_run && typed.is_some_and(|c| !c.is_whitespace());
+        if !extends_run {
+            self.undo_stack.push(before);
+            if self.undo_stack.len() > UNDO_LIMIT {
+                let overflow = self.undo_stack.len() - UNDO_LIMIT;
+                self.undo_stack.drain(..overflow);
+            }
+        }
+        self.redo_stack.clear();
+        self.typing_run = typed.is_some();
+    }
+
+    /// Revert the last edit step. Returns false when there is nothing to undo.
+    pub fn undo(&mut self) -> bool {
+        let Some(prev) = self.undo_stack.pop() else {
+            return false;
+        };
+        self.redo_stack.push(self.snapshot());
+        self.restore(prev);
+        self.typing_run = false;
+        true
+    }
+
+    /// Re-apply the last undone step. Returns false when there is nothing to redo.
+    pub fn redo(&mut self) -> bool {
+        let Some(next) = self.redo_stack.pop() else {
+            return false;
+        };
+        self.undo_stack.push(self.snapshot());
+        self.restore(next);
+        self.typing_run = false;
+        true
     }
 
     pub fn line_count(&self) -> usize {
@@ -820,6 +889,57 @@ mod tests {
         b.col = 2;
         assert!(b.delete_to_line_end());
         assert_eq!(b.full_text(), "wö");
+    }
+
+    fn typed(b: &mut InputBuffer, text: &str) {
+        for c in text.chars() {
+            let before = b.snapshot();
+            b.insert_char(c);
+            b.record_edit(before, Some(c));
+        }
+    }
+
+    #[test]
+    fn undo_restores_line_kill_and_redo_reapplies() {
+        let mut b = InputBuffer::new();
+        typed(&mut b, "select 1");
+        let before = b.snapshot();
+        b.delete_to_line_start();
+        b.record_edit(before, None);
+        assert_eq!(b.full_text(), "");
+        assert!(b.undo());
+        assert_eq!((b.full_text().as_str(), b.col), ("select 1", 8));
+        assert!(b.redo());
+        assert_eq!((b.full_text().as_str(), b.col), ("", 0));
+        assert!(!b.redo());
+    }
+
+    #[test]
+    fn undo_groups_typing_by_word() {
+        let mut b = InputBuffer::new();
+        typed(&mut b, "select * from");
+        assert!(b.undo());
+        assert_eq!(b.full_text(), "select *");
+        assert!(b.undo());
+        assert_eq!(b.full_text(), "select");
+        assert!(b.undo());
+        assert_eq!(b.full_text(), "");
+        assert!(!b.undo());
+    }
+
+    #[test]
+    fn caret_move_splits_typing_and_new_edit_clears_redo() {
+        let mut b = InputBuffer::new();
+        typed(&mut b, "ab");
+        let before = b.snapshot();
+        b.move_left();
+        b.record_edit(before, None);
+        typed(&mut b, "x");
+        assert_eq!(b.full_text(), "axb");
+        assert!(b.undo());
+        assert_eq!((b.full_text().as_str(), b.col), ("ab", 1));
+        typed(&mut b, "y");
+        assert!(!b.redo(), "new edit drops the redo branch");
     }
 
     fn scoped_completer() -> Completer {
