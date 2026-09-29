@@ -3,12 +3,15 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::config::{
-    OUTPUT_SCROLL_LINE, OUTPUT_SCROLL_PAGE, QUIT_CONFIRM_TIMEOUT, SCROLLBACK_LIMIT,
+    OUTPUT_SCROLL_LINE, OUTPUT_SCROLL_PAGE, QUIT_CONFIRM_TIMEOUT, SCROLLBACK_LIMIT, SPINNER_DELAY,
 };
-use crate::db::{Database, DbError, SchemaCache};
+use crate::db::{Database, DbError, QueryResult, SchemaCache};
 use crate::editor::{Completer, History, InputBuffer};
 use crate::parser::{self, DotCommand, StatementKind};
 use crate::storage;
@@ -42,10 +45,53 @@ pub enum LineKind {
     Warn,
 }
 
+/// Statement executed on the worker thread.
+enum Job {
+    Select(String),
+    Write(String),
+    /// Re-run of the grid's SELECT (`r` in table mode).
+    Refresh(String),
+}
+
+/// What the worker sends back for a `Job`.
+enum Outcome {
+    Select(String, Result<QueryResult, DbError>),
+    Write(String, Result<usize, DbError>),
+    Refresh(Result<QueryResult, DbError>),
+}
+
+impl Job {
+    fn run(self, db: &mut Database) -> Outcome {
+        match self {
+            Job::Select(sql) => {
+                let r = db.query_select(&sql);
+                Outcome::Select(sql, r)
+            }
+            Job::Write(sql) => {
+                let r = db.execute_write(&sql);
+                Outcome::Write(sql, r)
+            }
+            Job::Refresh(sql) => Outcome::Refresh(db.query_select(&sql)),
+        }
+    }
+}
+
+/// A statement in flight on the worker thread.
+struct RunningQuery {
+    started: Instant,
+    label: &'static str,
+    rx: mpsc::Receiver<(Outcome, Duration)>,
+}
+
 /// Full application state. Rendered by `ui::render` (which clamps
 /// `scroll_offset` to the current viewport so overscroll can't accumulate).
 pub struct App {
-    pub db: Database,
+    /// Shared with the worker thread; the UI thread only locks it while
+    /// no statement is running, so rendering never blocks on the database.
+    db: Arc<Mutex<Database>>,
+    /// Status-bar description of `db`, cached so rendering needs no lock.
+    pub db_label: String,
+    running: Option<RunningQuery>,
     pub mode: Mode,
     pub input: InputBuffer,
     pub history: History,
@@ -70,7 +116,9 @@ pub struct App {
 impl App {
     pub fn new(db: Database) -> Self {
         Self {
-            db,
+            db_label: db.label(),
+            db: Arc::new(Mutex::new(db)),
+            running: None,
             mode: Mode::Input,
             input: InputBuffer::new(),
             history: History::new(),
@@ -105,7 +153,7 @@ impl App {
 
     /// (Re)load table/column names for autocompletion.
     pub fn refresh_schema(&mut self) {
-        self.schema = self.db.refresh_schema_cache();
+        self.schema = lock_db(&self.db).refresh_schema_cache();
         let s = self.schema.clone();
         self.completer
             .set_schema(s.tables, s.columns, s.table_columns);
@@ -171,6 +219,13 @@ impl App {
     /// Handle one key event. Returns nothing; check `should_quit` after.
     /// Every input-buffer change made by the key becomes an undo step.
     pub fn handle_key(&mut self, key: KeyEvent) {
+        if self.is_busy() {
+            // Only quitting is possible until the statement finishes.
+            if is_ctrl_d(key) {
+                self.should_quit = true;
+            }
+            return;
+        }
         if self.mode == Mode::Input && self.handle_undo_key(key) {
             return;
         }
@@ -460,12 +515,12 @@ impl App {
     /// Re-run the grid's SELECT, keeping wrap mode and (clamped) scroll.
     /// On failure the error goes to scrollback and the grid closes.
     fn refresh_table(&mut self) {
-        let Some(sql) = self.table_sql.clone() else {
-            return;
-        };
-        let started = Instant::now();
-        let outcome = self.db.query_select(&sql);
-        let elapsed_ms = table_view::ceil_millis(started.elapsed());
+        if let Some(sql) = self.table_sql.clone() {
+            self.start_job(Job::Refresh(sql), "Refreshing");
+        }
+    }
+
+    fn apply_refresh(&mut self, outcome: Result<QueryResult, DbError>, elapsed_ms: u128) {
         match outcome {
             Ok(result) => {
                 let mut view = TableView::new(result);
@@ -548,41 +603,103 @@ impl App {
         // Echo the command back (collapsed to flow in narrow windows is
         // handled by the renderer; keep full text here).
         self.push_line(format!("# {}", text.trim()), LineKind::Echo);
-        match parser::classify(&sql) {
-            StatementKind::Select => self.execute_select(&sql),
-            StatementKind::Write => self.execute_write(&sql),
-        }
         self.input.clear();
+        let job = match parser::classify(&sql) {
+            StatementKind::Select => Job::Select(sql),
+            StatementKind::Write => Job::Write(sql),
+        };
+        self.start_job(job, "Running query");
+    }
+
+    /// Whether a statement is executing on the worker thread.
+    pub fn is_busy(&self) -> bool {
+        self.running.is_some()
+    }
+
+    /// Label and elapsed time of the running statement, for the spinner.
+    pub fn busy_status(&self) -> Option<(&'static str, Duration)> {
+        self.running
+            .as_ref()
+            .map(|r| (r.label, r.started.elapsed()))
+    }
+
+    /// Apply the running statement's result if it has finished.
+    /// Returns true when something changed on screen.
+    pub fn poll_query(&mut self) -> bool {
+        self.wait_query(Duration::ZERO)
+    }
+
+    /// Execute `job` on a worker thread so the UI keeps redrawing. Fast
+    /// statements are awaited briefly, so they never flash the spinner.
+    fn start_job(&mut self, job: Job, label: &'static str) {
+        let db = Arc::clone(&self.db);
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut db = lock_db(&db);
+            let started = Instant::now();
+            let outcome = job.run(&mut db);
+            let _ = tx.send((outcome, started.elapsed()));
+        });
+        self.running = Some(RunningQuery {
+            started: Instant::now(),
+            label,
+            rx,
+        });
+        self.wait_query(SPINNER_DELAY);
+    }
+
+    /// Wait up to `timeout` for the running statement and apply its result.
+    /// Returns true when the statement finished (or its worker died).
+    fn wait_query(&mut self, timeout: Duration) -> bool {
+        let Some(running) = &self.running else {
+            return false;
+        };
+        let received = match running.rx.recv_timeout(timeout) {
+            Ok(r) => Some(r),
+            Err(RecvTimeoutError::Timeout) => return false,
+            Err(RecvTimeoutError::Disconnected) => None,
+        };
+        self.running = None;
+        match received {
+            Some((outcome, elapsed)) => {
+                self.apply_outcome(outcome, table_view::ceil_millis(elapsed));
+            }
+            None => self.push_line("Error: query stopped unexpectedly", LineKind::Err),
+        }
+        true
+    }
+
+    fn apply_outcome(&mut self, outcome: Outcome, elapsed_ms: u128) {
+        match outcome {
+            Outcome::Select(sql, r) => self.show_select(sql, r, elapsed_ms),
+            Outcome::Write(sql, r) => self.show_write(&sql, r),
+            Outcome::Refresh(r) => return self.apply_refresh(r, elapsed_ms),
+        }
         // Schema may have changed (CREATE/DROP/ALTER) — refresh cheaply.
         self.refresh_schema();
     }
 
     fn execute_dot(&mut self, cmd: DotCommand) {
         match cmd {
-            DotCommand::Tables => match self.db.list_tables() {
-                Ok(tables) => {
-                    if tables.is_empty() {
-                        self.push_line("Warning: no tables in database", LineKind::Warn);
-                    } else {
-                        for t in tables {
-                            self.push_line(t, LineKind::Ok);
+            DotCommand::Tables => {
+                let tables = lock_db(&self.db).list_tables();
+                match tables {
+                    Ok(tables) => {
+                        if tables.is_empty() {
+                            self.push_line("Warning: no tables in database", LineKind::Warn);
+                        } else {
+                            for t in tables {
+                                self.push_line(t, LineKind::Ok);
+                            }
                         }
                     }
+                    Err(e) => self.push_line(e.message(), LineKind::Err),
                 }
-                Err(e) => self.push_line(e.message(), LineKind::Err),
-            },
-            DotCommand::Schema { table } => match self.db.get_schema(&table) {
-                Ok(stmts) => {
-                    for s in stmts {
-                        let stmt = s.trim_end_matches(';').trim().to_string() + ";";
-                        self.push_line(stmt, LineKind::Ok);
-                    }
-                }
-                Err(DbError::NoSuchTable) => {
-                    self.push_line(format!("Error: no such table: {table}"), LineKind::Err);
-                }
-                Err(e) => self.push_line(e.message(), LineKind::Err),
-            },
+            }
+            DotCommand::Schema { table } => {
+                let schema = lock_db(&self.db).get_schema(&table);
+                self.show_schema(&table, schema);
+            }
             DotCommand::Clear => {
                 // `submit_input` already echoed `# .clear`; drop everything
                 // (history entry is kept) so the output is fully empty.
@@ -592,10 +709,27 @@ impl App {
         self.input.clear();
     }
 
-    fn execute_select(&mut self, sql: &str) {
-        let started = Instant::now();
-        let outcome = self.db.query_select(sql);
-        let elapsed_ms = table_view::ceil_millis(started.elapsed());
+    fn show_schema(&mut self, table: &str, schema: Result<Vec<String>, DbError>) {
+        match schema {
+            Ok(stmts) => {
+                for s in stmts {
+                    let stmt = s.trim_end_matches(';').trim().to_string() + ";";
+                    self.push_line(stmt, LineKind::Ok);
+                }
+            }
+            Err(DbError::NoSuchTable) => {
+                self.push_line(format!("Error: no such table: {table}"), LineKind::Err);
+            }
+            Err(e) => self.push_line(e.message(), LineKind::Err),
+        }
+    }
+
+    fn show_select(
+        &mut self,
+        sql: String,
+        outcome: Result<QueryResult, DbError>,
+        elapsed_ms: u128,
+    ) {
         match outcome {
             Ok(result) => {
                 if result.headers.is_empty() {
@@ -610,7 +744,7 @@ impl App {
                 let mut view = TableView::new(result);
                 view.elapsed_ms = elapsed_ms;
                 self.table = Some(view);
-                self.table_sql = Some(sql.to_string());
+                self.table_sql = Some(sql);
                 self.mode = Mode::Table;
                 if truncated {
                     // Remembered for the table footer; also visible in history.
@@ -627,8 +761,8 @@ impl App {
         }
     }
 
-    fn execute_write(&mut self, sql: &str) {
-        match self.db.execute_write(sql) {
+    fn show_write(&mut self, sql: &str, outcome: Result<usize, DbError>) {
+        match outcome {
             Ok(n) => {
                 let first = sql
                     .split_whitespace()
@@ -646,6 +780,11 @@ impl App {
             Err(e) => self.push_line(e.message(), LineKind::Err),
         }
     }
+}
+
+/// Lock the shared database; a worker panic must not wedge the app.
+fn lock_db(db: &Mutex<Database>) -> MutexGuard<'_, Database> {
+    db.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The char a key inserts as plain typing (no modifiers besides Shift).
@@ -981,6 +1120,55 @@ mod tests {
         p
     }
 
+    /// Press a key that may start a statement and wait until it finishes.
+    fn run_key(app: &mut App, code: KeyCode) {
+        app.handle_key(key(code));
+        app.wait_query(Duration::from_secs(30));
+        assert!(!app.is_busy(), "statement still running");
+    }
+
+    /// Recursive CTE that keeps SQLite busy for a noticeable while.
+    const SLOW_SQL: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c \
+                            WHERE x < 20000000) SELECT count(*) AS n FROM c;";
+
+    #[test]
+    fn slow_statement_runs_in_background_and_ignores_keys() {
+        let path = seed_e2e_db();
+        let mut app = App::new(Database::Sqlite(path.clone()));
+        type_text(&mut app, SLOW_SQL);
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.is_busy(), "slow statement outlives the spinner delay");
+        assert!(app.input.is_blank(), "prompt cleared while running");
+        let (label, _) = app.busy_status().expect("busy status");
+        assert_eq!(label, "Running query");
+        assert!(!app.poll_query(), "not finished yet");
+
+        type_text(&mut app, "x");
+        app.handle_key(ctrl_c());
+        assert!(app.input.is_blank(), "typing ignored while busy");
+        assert!(!app.is_quit_armed(), "Ctrl+C ignored while busy");
+
+        app.wait_query(Duration::from_secs(60));
+        assert!(!app.is_busy());
+        assert_eq!(app.mode, Mode::Table);
+        let t = app.table.as_ref().expect("table");
+        assert_eq!(t.rows[0][0], "20000000");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ctrl_d_quits_while_busy() {
+        let path = seed_e2e_db();
+        let mut app = App::new(Database::Sqlite(path.clone()));
+        type_text(&mut app, SLOW_SQL);
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.is_busy());
+        app.handle_key(mod_key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert!(app.should_quit);
+        app.wait_query(Duration::from_secs(60));
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn end_to_end_select_table_dot_write_error_history() {
         let path = seed_e2e_db();
@@ -990,7 +1178,7 @@ mod tests {
 
         // SELECT -> grid mode with 2 rows.
         type_text(&mut app, "select * from users;");
-        app.handle_key(key(KeyCode::Enter));
+        run_key(&mut app, KeyCode::Enter);
         assert_eq!(app.mode, Mode::Table);
         assert_eq!(app.table.as_ref().expect("table").row_count(), 2);
 
@@ -1012,7 +1200,7 @@ mod tests {
 
         // Write -> affected-rows confirmation.
         type_text(&mut app, "delete from users where name = 'ana';");
-        app.handle_key(key(KeyCode::Enter));
+        run_key(&mut app, KeyCode::Enter);
         assert!(
             app.scrollback
                 .iter()
@@ -1021,7 +1209,7 @@ mod tests {
 
         // Bad SQL -> light-red error line, app stays alive.
         type_text(&mut app, "select * from nope;");
-        app.handle_key(key(KeyCode::Enter));
+        run_key(&mut app, KeyCode::Enter);
         assert_eq!(app.mode, Mode::Input);
         assert!(
             app.scrollback
@@ -1155,12 +1343,12 @@ mod tests {
         let path = seed_e2e_db();
         let mut app = App::new(Database::Sqlite(path.clone()));
         type_text(&mut app, "select * from users;");
-        app.handle_key(key(KeyCode::Enter));
+        run_key(&mut app, KeyCode::Enter);
         assert_eq!(app.table.as_ref().expect("table").row_count(), 2);
         let conn = rusqlite::Connection::open(&path).expect("open");
         conn.execute("INSERT INTO users (name) VALUES ('zed')", [])
             .expect("insert");
-        app.handle_key(key(KeyCode::Char('r')));
+        run_key(&mut app, KeyCode::Char('r'));
         assert_eq!(app.mode, Mode::Table);
         assert_eq!(app.table.as_ref().expect("table").row_count(), 3);
         let _ = std::fs::remove_file(&path);
@@ -1172,7 +1360,7 @@ mod tests {
         let path = seed_e2e_db();
         let mut app = App::new(Database::Sqlite(path.clone()));
         type_text(&mut app, "select * from users;");
-        app.handle_key(key(KeyCode::Enter));
+        run_key(&mut app, KeyCode::Enter);
         let view = |app: &App| app.table.as_ref().expect("table").view;
         app.handle_key(key(KeyCode::Char('j')));
         assert_eq!(view(&app), ViewMode::Table, "lowercase j only scrolls");
@@ -1181,7 +1369,7 @@ mod tests {
         assert_eq!(view(&app), ViewMode::Json);
         app.handle_key(key(KeyCode::Char('j')));
         assert_eq!(app.table.as_ref().expect("table").json_offset, 1);
-        app.handle_key(key(KeyCode::Char('r')));
+        run_key(&mut app, KeyCode::Char('r'));
         assert_eq!(view(&app), ViewMode::Json, "refresh keeps the JSON view");
         assert!(
             app.table
@@ -1208,7 +1396,7 @@ mod tests {
         assert_eq!(app.mode, Mode::Input);
         assert_eq!(app.input.lines().len(), 2);
         type_text(&mut app, "where id = 1;");
-        app.handle_key(key(KeyCode::Enter));
+        run_key(&mut app, KeyCode::Enter);
         assert!(
             app.scrollback
                 .iter()

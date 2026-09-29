@@ -46,6 +46,13 @@ pub const QUIT_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// Bottom-bar message shown after the first Ctrl+C in input mode.
 pub const QUIT_CONFIRM_MESSAGE: &str = "Press Ctrl+C again to quit";
 
+/// Spinner frames shown while a statement is running.
+pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// Time per spinner frame; also the redraw tick while a statement runs.
+pub const SPINNER_TICK: std::time::Duration = std::time::Duration::from_millis(80);
+/// Statements finishing within this window never show the spinner.
+pub const SPINNER_DELAY: std::time::Duration = std::time::Duration::from_millis(120);
+
 /// Minimum prefix length that triggers autocompletion.
 pub const COMPLETE_MIN_CHARS: usize = 2;
 /// Maximum visible items in the TAB completion popup (it scrolls beyond).

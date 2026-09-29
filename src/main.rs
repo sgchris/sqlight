@@ -77,25 +77,31 @@ fn run() -> Result<(), i32> {
     loop {
         // Block for input; repaint only when something happened.
         // The 500ms tick also lets a stale Ctrl+C confirm lapse so the
-        // bottom bar reverts even with no further keypresses.
-        match event::poll(Duration::from_millis(500)) {
+        // bottom bar reverts even with no further keypresses. While a
+        // statement runs, tick at the spinner rate to animate it.
+        let tick = if app.is_busy() {
+            config::SPINNER_TICK
+        } else {
+            Duration::from_millis(500)
+        };
+        let mut redraw = match event::poll(tick) {
             Ok(true) => match event::read() {
                 Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                     app.handle_key(key);
-                    terminal.draw(|f| ui::render(f, &mut app)).ok();
+                    true
                 }
                 Ok(_) => {
                     app.expire_quit_arm();
-                    terminal.draw(|f| ui::render(f, &mut app)).ok();
+                    true
                 }
                 Err(_) => break,
             },
-            Ok(false) => {
-                if app.expire_quit_arm() {
-                    terminal.draw(|f| ui::render(f, &mut app)).ok();
-                }
-            }
+            Ok(false) => app.expire_quit_arm() || app.is_busy(),
             Err(_) => break,
+        };
+        redraw |= app.poll_query();
+        if redraw {
+            terminal.draw(|f| ui::render(f, &mut app)).ok();
         }
         if app.should_quit {
             break;

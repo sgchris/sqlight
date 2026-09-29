@@ -15,9 +15,10 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{App, LineKind, Mode};
 use crate::config::{
     COLOR_ERROR, COLOR_HINT, COLOR_OK, COLOR_PROMPT, COLOR_WARN, COMPLETE_POPUP_MAX_ROWS,
-    CONT_INDENT, INPUT_HINT, MAX_ROWS, PROMPT, QUIT_CONFIRM_MESSAGE,
+    CONT_INDENT, INPUT_HINT, MAX_ROWS, PROMPT, QUIT_CONFIRM_MESSAGE, SPINNER_FRAMES, SPINNER_TICK,
 };
 use crate::table_view::{TableView, wrap_text};
+use std::time::Duration;
 
 /// Max visual rows the input box may occupy (rest goes to scrollback).
 const MAX_INPUT_HEIGHT: u16 = 12;
@@ -53,6 +54,16 @@ fn render_input(frame: &mut Frame, app: &mut App, area: Rect) {
 
     render_scrollback(frame, app, chunks[0]);
     render_completion_popup(frame, app, chunks[0]);
+    if let Some((label, elapsed)) = app.busy_status() {
+        render_busy(frame, chunks[1], label, elapsed);
+        render_status(
+            frame,
+            chunks[2],
+            "Waiting for the database · Ctrl+D quit",
+            &app.db_label,
+        );
+        return;
+    }
     render_prompt(frame, app, chunks[1]);
     if app.is_quit_armed() {
         render_bar_line(
@@ -66,9 +77,32 @@ fn render_input(frame: &mut Frame, app: &mut App, area: Rect) {
             frame,
             chunks[2],
             "Enter run/newline · Tab complete · ↑↓ history · Shift+↑↓/PgUp/PgDn output · Ctrl+C clear/quit",
-            &app.db.label(),
+            &app.db_label,
         );
     }
+}
+
+/// Spinner frame for `elapsed`; derived from time so rendering stays stateless.
+fn spinner_frame(elapsed: Duration) -> &'static str {
+    let i = elapsed.as_millis() / SPINNER_TICK.as_millis().max(1);
+    SPINNER_FRAMES[(i % SPINNER_FRAMES.len() as u128) as usize]
+}
+
+/// `Running query… 1.2s` — the spinner line's text after the frame.
+fn busy_text(label: &str, elapsed: Duration) -> String {
+    format!("{label}… {:.1}s", elapsed.as_secs_f64())
+}
+
+/// One-line busy indicator shown in place of the prompt. No cursor.
+fn render_busy(frame: &mut Frame, area: Rect, label: &str, elapsed: Duration) {
+    let line = Line::from(vec![
+        Span::styled(
+            format!("{} ", spinner_frame(elapsed)),
+            Style::default().fg(COLOR_PROMPT).bold(),
+        ),
+        Span::styled(busy_text(label, elapsed), Style::default().fg(COLOR_HINT)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn render_scrollback(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -398,13 +432,14 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
         wrap_state,
         table.view.label(),
     );
-    render_table_footer(frame, chunks[1], &status);
+    render_table_footer(frame, chunks[1], &status, app.busy_status());
     // No cursor in table mode (hidden by not setting a position).
 }
 
 /// JSON view: the result's pretty JSON, wrapped to the inner width and
 /// scrolled by visual line. Clamps `json_offset` back into the view.
 fn render_json(frame: &mut Frame, app: &mut App, area: Rect) {
+    let busy = app.busy_status();
     let Some(table) = app.table.as_mut() else {
         return;
     };
@@ -442,19 +477,28 @@ fn render_json(frame: &mut Frame, app: &mut App, area: Rect) {
         trunc_note,
         table.view.label(),
     );
-    render_table_footer(frame, chunks[1], &status);
+    render_table_footer(frame, chunks[1], &status, busy);
 }
 
 /// Two-line footer shared by the grid and JSON views: dynamic status
-/// first (never clipped away), key help second.
-fn render_table_footer(frame: &mut Frame, area: Rect, status: &str) {
+/// first (never clipped away; the spinner while refreshing), key help second.
+fn render_table_footer(
+    frame: &mut Frame,
+    area: Rect,
+    status: &str,
+    busy: Option<(&str, Duration)>,
+) {
     let foot = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
-    render_bar_line(
-        frame,
-        foot[0],
-        &crate::table_view::truncate_text(status, foot[0].width as usize),
-        Style::default().bold(),
-    );
+    if let Some((label, elapsed)) = busy {
+        render_busy(frame, foot[0], label, elapsed);
+    } else {
+        render_bar_line(
+            frame,
+            foot[0],
+            &crate::table_view::truncate_text(status, foot[0].width as usize),
+            Style::default().bold(),
+        );
+    }
     render_bar_line(
         frame,
         foot[1],
@@ -873,6 +917,57 @@ mod tests {
             scroll_rows(&before),
             "scrollback restored"
         );
+    }
+
+    #[test]
+    fn spinner_frame_advances_with_time_and_busy_text_shows_seconds() {
+        let at = |ms| spinner_frame(Duration::from_millis(ms));
+        assert_eq!(at(0), SPINNER_FRAMES[0]);
+        assert_eq!(at(SPINNER_TICK.as_millis() as u64), SPINNER_FRAMES[1]);
+        let cycle = SPINNER_TICK.as_millis() as u64 * SPINNER_FRAMES.len() as u64;
+        assert_eq!(at(cycle), SPINNER_FRAMES[0], "wraps around");
+        assert_eq!(
+            busy_text("Running query", Duration::from_millis(2340)),
+            "Running query… 2.3s"
+        );
+    }
+
+    #[test]
+    fn renders_spinner_instead_of_prompt_while_query_runs() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let path = std::env::temp_dir().join(format!("sqlight-ui-busy-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        rusqlite::Connection::open(&path).expect("create db");
+        let mut app = App::new(crate::db::Database::Sqlite(path.clone()));
+        let sql = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c \
+                   WHERE x < 20000000) SELECT count(*) FROM c;";
+        for ch in sql.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.is_busy());
+
+        let mut term = Terminal::new(TestBackend::new(200, 12)).expect("terminal");
+        term.draw(|f| render(f, &mut app)).expect("draw busy");
+        let text = screen_text(&term);
+        assert!(
+            text.contains("Running query… "),
+            "spinner line, got: {text}"
+        );
+        assert!(
+            SPINNER_FRAMES.iter().any(|f| text.contains(f)),
+            "spinner frame drawn"
+        );
+        assert!(text.contains("Ctrl+D quit"), "busy hint bar");
+        assert!(!text.contains(INPUT_HINT), "prompt hidden while running");
+
+        while !app.poll_query() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        term.draw(|f| render(f, &mut app)).expect("draw result");
+        assert!(!screen_text(&term).contains("Running query"));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
