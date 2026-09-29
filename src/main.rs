@@ -79,7 +79,7 @@ fn run() -> Result<(), i32> {
         // The 500ms tick also lets a stale Ctrl+C confirm lapse so the
         // bottom bar reverts even with no further keypresses. While a
         // statement runs, tick at the spinner rate to animate it.
-        let tick = if app.is_busy() {
+        let tick = if app.is_busy() || app.is_refresh_flash() {
             config::SPINNER_TICK
         } else {
             Duration::from_millis(500)
@@ -96,7 +96,11 @@ fn run() -> Result<(), i32> {
                 }
                 Err(_) => break,
             },
-            Ok(false) => app.expire_quit_arm() || app.is_busy(),
+            Ok(false) => {
+                let quit_lapsed = app.expire_quit_arm();
+                let flash_lapsed = app.expire_refresh_flash();
+                quit_lapsed || flash_lapsed || app.is_busy()
+            }
             Err(_) => break,
         };
         redraw |= app.poll_query();

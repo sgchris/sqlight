@@ -9,7 +9,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config::{
-    OUTPUT_SCROLL_LINE, OUTPUT_SCROLL_PAGE, QUIT_CONFIRM_TIMEOUT, SCROLLBACK_LIMIT, SPINNER_DELAY,
+    OUTPUT_SCROLL_LINE, OUTPUT_SCROLL_PAGE, QUIT_CONFIRM_TIMEOUT, REFRESH_FLASH, SCROLLBACK_LIMIT,
+    SPINNER_DELAY,
 };
 use crate::db::{Database, DbError, QueryResult, SchemaCache};
 use crate::editor::{Completer, History, InputBuffer};
@@ -92,6 +93,9 @@ pub struct App {
     /// Status-bar description of `db`, cached so rendering needs no lock.
     pub db_label: String,
     running: Option<RunningQuery>,
+    /// When the grid was last refreshed successfully (drives the
+    /// short-lived "Refreshed" badge).
+    pub refreshed_at: Option<Instant>,
     pub mode: Mode,
     pub input: InputBuffer,
     pub history: History,
@@ -119,6 +123,7 @@ impl App {
             db_label: db.label(),
             db: Arc::new(Mutex::new(db)),
             running: None,
+            refreshed_at: None,
             mode: Mode::Input,
             input: InputBuffer::new(),
             history: History::new(),
@@ -509,7 +514,23 @@ impl App {
         self.mode = Mode::Input;
         self.table = None;
         self.table_sql = None;
+        self.refreshed_at = None;
         self.completer.dismiss();
+    }
+
+    /// Whether the "Refreshed" badge should still be shown.
+    pub fn is_refresh_flash(&self) -> bool {
+        self.refreshed_at
+            .is_some_and(|t| t.elapsed() < REFRESH_FLASH)
+    }
+
+    /// Drop a lapsed "Refreshed" badge. Returns true if state changed.
+    pub fn expire_refresh_flash(&mut self) -> bool {
+        if self.refreshed_at.is_some() && !self.is_refresh_flash() {
+            self.refreshed_at = None;
+            return true;
+        }
+        false
     }
 
     /// Re-run the grid's SELECT, keeping wrap mode and (clamped) scroll.
@@ -533,6 +554,7 @@ impl App {
                     view.offset_x = old.offset_x.min(view.headers.len().saturating_sub(1));
                 }
                 self.table = Some(view);
+                self.refreshed_at = Some(Instant::now());
             }
             Err(e) => {
                 self.close_table();

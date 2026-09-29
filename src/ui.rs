@@ -93,16 +93,45 @@ fn busy_text(label: &str, elapsed: Duration) -> String {
     format!("{label}… {:.1}s", elapsed.as_secs_f64())
 }
 
-/// One-line busy indicator shown in place of the prompt. No cursor.
-fn render_busy(frame: &mut Frame, area: Rect, label: &str, elapsed: Duration) {
-    let line = Line::from(vec![
+/// Spinner frame + `busy_text`, as one styled line.
+fn busy_line(label: &str, elapsed: Duration) -> Line<'static> {
+    Line::from(vec![
         Span::styled(
             format!("{} ", spinner_frame(elapsed)),
             Style::default().fg(COLOR_PROMPT).bold(),
         ),
         Span::styled(busy_text(label, elapsed), Style::default().fg(COLOR_HINT)),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    ])
+}
+
+/// One-line busy indicator shown in place of the prompt. No cursor.
+fn render_busy(frame: &mut Frame, area: Rect, label: &str, elapsed: Duration) {
+    frame.render_widget(Paragraph::new(busy_line(label, elapsed)), area);
+}
+
+/// Grid/JSON badge: spinner while refreshing, then a short "Refreshed".
+fn table_badge(app: &App) -> Option<Line<'static>> {
+    if let Some((label, elapsed)) = app.busy_status() {
+        return Some(busy_line(label, elapsed));
+    }
+    app.is_refresh_flash()
+        .then(|| Line::from(Span::styled("✓ Refreshed", Style::default().fg(COLOR_OK))))
+}
+
+/// Draw `badge` over the right end of the box's top border, so it never
+/// displaces content. Skipped when it would collide with `title`.
+fn render_border_badge(frame: &mut Frame, area: Rect, title: &str, badge: Option<Line>) {
+    let Some(badge) = badge else {
+        return;
+    };
+    let badge = Line::from([vec![Span::raw(" ")], badge.spans, vec![Span::raw(" ")]].concat());
+    let w = badge.width() as u16;
+    let title_end = 1 + display_w(title) as u16;
+    if area.height == 0 || title_end + 1 + w + 1 > area.width {
+        return;
+    }
+    let rect = Rect::new(area.right() - 1 - w, area.y, w, 1);
+    frame.render_widget(Paragraph::new(badge), rect);
 }
 
 fn render_scrollback(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -412,8 +441,9 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
     // (wrap mode) or truncation (non-wrap mode). Letting `Paragraph` wrap
     // would turn one logical row into two terminal rows when the composed
     // line exceeds the inner width.
-    let para = Paragraph::new(Text::from(clipped)).block(Block::bordered().title(title));
+    let para = Paragraph::new(Text::from(clipped)).block(Block::bordered().title(title.as_str()));
     frame.render_widget(para, chunks[0]);
+    render_border_badge(frame, chunks[0], &title, table_badge(app));
 
     let wrap_state = table.wrap.label();
     let trunc_note = if table.truncated {
@@ -432,14 +462,14 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
         wrap_state,
         table.view.label(),
     );
-    render_table_footer(frame, chunks[1], &status, app.busy_status());
+    render_table_footer(frame, chunks[1], &status);
     // No cursor in table mode (hidden by not setting a position).
 }
 
 /// JSON view: the result's pretty JSON, wrapped to the inner width and
 /// scrolled by visual line. Clamps `json_offset` back into the view.
 fn render_json(frame: &mut Frame, app: &mut App, area: Rect) {
-    let busy = app.busy_status();
+    let badge = table_badge(app);
     let Some(table) = app.table.as_mut() else {
         return;
     };
@@ -460,8 +490,9 @@ fn render_json(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|l| Line::from(l.clone()))
         .collect();
     let title = format!(" {} rows · JSON ", table.row_count());
-    let para = Paragraph::new(Text::from(visible)).block(Block::bordered().title(title));
+    let para = Paragraph::new(Text::from(visible)).block(Block::bordered().title(title.as_str()));
     frame.render_widget(para, chunks[0]);
+    render_border_badge(frame, chunks[0], &title, badge);
 
     let trunc_note = if table.truncated {
         format!(" · truncated to first {MAX_ROWS}")
@@ -477,28 +508,19 @@ fn render_json(frame: &mut Frame, app: &mut App, area: Rect) {
         trunc_note,
         table.view.label(),
     );
-    render_table_footer(frame, chunks[1], &status, busy);
+    render_table_footer(frame, chunks[1], &status);
 }
 
 /// Two-line footer shared by the grid and JSON views: dynamic status
-/// first (never clipped away; the spinner while refreshing), key help second.
-fn render_table_footer(
-    frame: &mut Frame,
-    area: Rect,
-    status: &str,
-    busy: Option<(&str, Duration)>,
-) {
+/// first (never clipped away), key help second.
+fn render_table_footer(frame: &mut Frame, area: Rect, status: &str) {
     let foot = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
-    if let Some((label, elapsed)) = busy {
-        render_busy(frame, foot[0], label, elapsed);
-    } else {
-        render_bar_line(
-            frame,
-            foot[0],
-            &crate::table_view::truncate_text(status, foot[0].width as usize),
-            Style::default().bold(),
-        );
-    }
+    render_bar_line(
+        frame,
+        foot[0],
+        &crate::table_view::truncate_text(status, foot[0].width as usize),
+        Style::default().bold(),
+    );
     render_bar_line(
         frame,
         foot[1],
@@ -968,6 +990,97 @@ mod tests {
         term.draw(|f| render(f, &mut app)).expect("draw result");
         assert!(!screen_text(&term).contains("Running query"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn screen_rows(term: &Terminal<TestBackend>) -> Vec<String> {
+        let buf = term.backend().buffer();
+        buf.content()
+            .chunks(buf.area.width as usize)
+            .map(|r| r.iter().map(|c| c.symbol()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn refresh_badge_overlays_top_border_without_moving_anything() {
+        use crate::db::QueryResult;
+        use crate::table_view::TableView;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let path =
+            std::env::temp_dir().join(format!("sqlight-ui-refresh-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        rusqlite::Connection::open(&path).expect("create db");
+        let mut app = App::new(crate::db::Database::Sqlite(path.clone()));
+        app.table = Some(TableView::new(QueryResult {
+            headers: vec!["n".to_string()],
+            rows: vec![vec!["1".to_string()], vec!["2".to_string()]],
+            truncated: false,
+            kinds: Vec::new(),
+        }));
+        app.table_sql = Some(
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c \
+             WHERE x < 20000000) SELECT count(*) AS n FROM c"
+                .to_string(),
+        );
+        app.mode = Mode::Table;
+
+        let mut term = Terminal::new(TestBackend::new(80, 12)).expect("terminal");
+        term.draw(|f| render(f, &mut app)).expect("draw before");
+        let before = screen_rows(&term);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(app.is_busy());
+        term.draw(|f| render(f, &mut app)).expect("draw refreshing");
+        let during = screen_rows(&term);
+        assert!(during[0].contains("Refreshing… "), "got: {}", during[0]);
+        assert!(
+            during[0].starts_with(&before[0][..20]),
+            "title kept in place"
+        );
+        assert_eq!(during[1..], before[1..], "rest of the screen unchanged");
+
+        while !app.poll_query() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        term.draw(|f| render(f, &mut app)).expect("draw done");
+        let done = screen_rows(&term);
+        assert!(done[0].contains("✓ Refreshed"), "got: {}", done[0]);
+        assert!(
+            done.iter().any(|r| r.contains("20000000")),
+            "new data shown"
+        );
+
+        app.refreshed_at = Some(
+            std::time::Instant::now() - crate::config::REFRESH_FLASH - Duration::from_millis(10),
+        );
+        assert!(app.expire_refresh_flash());
+        term.draw(|f| render(f, &mut app))
+            .expect("draw after flash");
+        assert!(!screen_rows(&term)[0].contains("Refreshed"), "badge gone");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn json_view_shows_refresh_badge_on_border() {
+        use crate::db::QueryResult;
+        use crate::table_view::TableView;
+
+        let mut app = App::new(crate::db::Database::Sqlite(PathBuf::from("demo.db")));
+        let mut view = TableView::new(QueryResult {
+            headers: vec!["id".to_string()],
+            rows: vec![vec!["1".to_string()]],
+            truncated: false,
+            kinds: Vec::new(),
+        });
+        view.show_json();
+        app.table = Some(view);
+        app.mode = Mode::Table;
+        app.refreshed_at = Some(std::time::Instant::now());
+        let mut term = Terminal::new(TestBackend::new(80, 12)).expect("terminal");
+        term.draw(|f| render(f, &mut app)).expect("draw json");
+        let rows = screen_rows(&term);
+        assert!(rows[0].contains("JSON"), "title kept");
+        assert!(rows[0].contains("✓ Refreshed"), "got: {}", rows[0]);
     }
 
     #[test]

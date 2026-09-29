@@ -52,6 +52,8 @@ pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", 
 pub const SPINNER_TICK: std::time::Duration = std::time::Duration::from_millis(80);
 /// Statements finishing within this window never show the spinner.
 pub const SPINNER_DELAY: std::time::Duration = std::time::Duration::from_millis(120);
+/// How long the "✓ Refreshed" badge stays on the grid after `r`.
+pub const REFRESH_FLASH: std::time::Duration = std::time::Duration::from_millis(1200);
 
 /// Minimum prefix length that triggers autocompletion.
 pub const COMPLETE_MIN_CHARS: usize = 2;
