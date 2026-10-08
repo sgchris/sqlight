@@ -516,11 +516,8 @@ impl History {
         if entry.trim().is_empty() {
             return;
         }
-        // Avoid consecutive duplicates.
-        if self.entries.last().is_some_and(|last| last == &entry) {
-            self.cursor = None;
-            return;
-        }
+        // Keep entries unique: a repeated command moves to the newest slot.
+        self.entries.retain(|e| e != &entry);
         self.entries.push(entry);
         if self.entries.len() > HISTORY_LIMIT {
             let overflow = self.entries.len() - HISTORY_LIMIT;
@@ -761,6 +758,20 @@ mod tests {
         assert_eq!(up2, "select 1;");
         let down = h.move_down().unwrap();
         assert_eq!(down, "line1\nline2;");
+    }
+
+    #[test]
+    fn history_skips_duplicates() {
+        let mut h = History::new();
+        h.push("select 1;".to_string());
+        h.push("select 1;".to_string());
+        assert_eq!(h.entries(), &["select 1;".to_string()]);
+        h.push("select 2;".to_string());
+        h.push("select 1;".to_string());
+        assert_eq!(
+            h.entries(),
+            &["select 2;".to_string(), "select 1;".to_string()]
+        );
     }
 
     #[test]

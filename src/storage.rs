@@ -99,8 +99,8 @@ pub fn load_history_from_file(path: &Path) -> History {
     };
     let mut history = History::new();
     for line in text.lines() {
-        // `History::push` re-applies blank filtering, consecutive-dup
-        // suppression and `HISTORY_LIMIT` trimming.
+        // `History::push` re-applies blank filtering, duplicate
+        // removal and `HISTORY_LIMIT` trimming.
         history.push(decode_entry(line));
     }
     history
